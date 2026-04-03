@@ -326,11 +326,10 @@ class DataActor:
         learner_actor,
         replay_buffer_actor,
     ):
-        # Force CPU backend. JAX_PLATFORMS=cpu is sufficient — do NOT hide devices
-        # with CUDA_VISIBLE_DEVICES="" because the CUDA plugin calls cuInit() before
-        # JAX_PLATFORMS is checked and raises CUDA_ERROR_NO_DEVICE if no devices
-        # are visible. Leaving CUDA visible lets cuInit succeed; JAX_PLATFORMS then
-        # selects CPU as the only active backend and no GPU memory is allocated.
+        # Ray sets CUDA_VISIBLE_DEVICES="" for CPU workers, causing the JAX CUDA
+        # plugin to crash on cuInit(0). Pop it so the device is visible and cuInit
+        # succeeds, then set JAX_PLATFORMS=cpu so JAX never actually uses the GPU.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["JAX_PLATFORMS"] = "cpu"
 
         import jax
@@ -443,7 +442,11 @@ def _fetch_env_metadata() -> Tuple[int, int]:
     is never initialized in the main process, preserving GPU memory for the
     LearnerActor.
     """
-    # Same reasoning as DataActor: use JAX_PLATFORMS=cpu, not CUDA_VISIBLE_DEVICES="".
+    # Ray sets CUDA_VISIBLE_DEVICES="" for workers with no GPU allocation, which
+    # causes the JAX CUDA plugin to crash on cuInit(0). Pop the restriction so
+    # the GPU is visible (cuInit succeeds), then use JAX_PLATFORMS=cpu so JAX
+    # selects CPU as its backend and never actually allocates GPU memory.
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     os.environ["JAX_PLATFORMS"] = "cpu"
     from utils.mpe_env_wrapper import MPEEnvWrapper
 
