@@ -2,3 +2,4 @@ jax
 flax
 chex
 mctx
+pytest

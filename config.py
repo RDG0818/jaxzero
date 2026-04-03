@@ -28,7 +28,7 @@ class ModelConfig:
 @dataclass
 class MCTSConfig:
     """Hyperparameters for the MCTS planner."""
-    planner_mode: str = "sequential"  # "independent", "sequential", "joint"
+    planner_mode: str = "independent"  # "independent" or "joint"
     num_simulations: int = 100
     max_depth_gumbel_search: int = 10
     num_gumbel_samples: int = 10

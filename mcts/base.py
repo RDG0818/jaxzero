@@ -1,125 +1,103 @@
+# mcts/base.py
+
 from abc import ABC, abstractmethod
 from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import chex
-from typing import Tuple
 
 from model.model import FlaxMAMuZeroNet
 from config import ExperimentConfig
 from utils.utils import DiscreteSupport
 
-class MCTSPlanOutput(NamedTuple):
-    """
-    A container for the output of any MCTS planner.
 
-    Attributes:
-        joint_action: A vector of shape (N,) containing the chosen action for each agent.
-        policy_targets: The MCTS policy targets for each agent. Shape (N, A).
-        root_value: A scalar representing the estimated value of the root state.
+class MCTSPlanOutput(NamedTuple):
+    """Output of any MCTS planner for a single planning step.
+
+    Shapes (N=agents, A=actions):
+        joint_action:   (N,)    — chosen action index per agent
+        policy_targets: (N, A)  — MCTS-improved policy targets for training
+        root_value:     scalar  — estimated value of the root state
+        agent_order:    (N,)    — order agents were planned in (for sequential planners)
     """
-    joint_action:   jnp.ndarray
-    policy_targets: jnp.ndarray
+    joint_action:   chex.Array
+    policy_targets: chex.Array
     root_value:     float
-    agent_order: chex.Array
+    agent_order:    chex.Array
+
 
 class MCTSPlanner(ABC):
     """
-    Abstract Base Class for all MCTS planner variations.
+    Abstract base class for all MCTS planner variants.
 
-    This class defines a standard structure for all MCTS planners, ensuring they
-    implement a recurrent function for rollouts and a main planning loop. It also
-    establishes a consistent pattern for JIT compilation.
-
-    Concrete subclasses are expected to:
-    1. Implement the `_recurrent_fn` method with the specific simulation logic.
-    2. Implement the `_plan_loop` method with the main planning algorithm.
-    3. In their `__init__` method, create JIT-compiled versions of these
-       methods and assign them to `self._recurrent_fn_jit` and `self.plan_jit`.
+    Subclasses must implement `_recurrent_fn` and `_plan_loop`.
+    JIT compilation is handled externally (e.g. in DataActor) — planners
+    do not JIT their own `plan()` method.
     """
+
     def __init__(self, model: FlaxMAMuZeroNet, config: ExperimentConfig):
-        """Initializes common attributes for all planners."""
         self.model = model
-        self.config = config
         self.num_agents = config.train.num_agents
         self.action_space_size = model.action_space_size
-        
-        # Common MCTS/MuZero parameters
+
         self.num_simulations = config.mcts.num_simulations
         self.max_depth_gumbel_search = config.mcts.max_depth_gumbel_search
         self.num_gumbel_samples = config.mcts.num_gumbel_samples
-        
-        # Support objects for converting logits to scalar values       
-        self.value_support = DiscreteSupport(min=-config.model.value_support_size, max=config.model.value_support_size)
-        self.reward_support = DiscreteSupport(min=-config.model.reward_support_size, max=config.model.reward_support_size)
+        self.discount_gamma = config.train.discount_gamma
 
-        # Noise
+        self.value_support = DiscreteSupport(
+            min=-config.model.value_support_size,
+            max=config.model.value_support_size,
+        )
+        self.reward_support = DiscreteSupport(
+            min=-config.model.reward_support_size,
+            max=config.model.reward_support_size,
+        )
+
         self.dirichlet_alpha = config.mcts.dirichlet_alpha
         self.dirichlet_fraction = config.mcts.dirichlet_fraction
-        
-        # Subclasses must define these in their own __init__
-        self.plan_jit = None
-        self._recurrent_fn_jit = None
+
+        # JIT the recurrent function once at construction; it's used as an
+        # inner callback inside mctx and benefits from early compilation.
+        self._recurrent_fn_jit = jax.jit(self._recurrent_fn)
 
     def add_dirichlet_noise(
         self, rng_key: chex.Array, prior_logits: chex.Array
-    ) -> Tuple[chex.Array, chex.Array]:
+    ) -> tuple[chex.Array, chex.Array]:
         """
         Applies Dirichlet noise to root policy logits for exploration.
-        
-        Args:
-            rng_key: The random key for generating noise.
-            prior_logits: The policy logits from the network.
-            
+
         Returns:
-            A tuple containing:
-                - A new random key to be used for the MCTS search.
-                - The noisy policy logits.
+            A new rng key (for the subsequent MCTS search) and the noisy logits.
         """
         mcts_key, noise_key = jax.random.split(rng_key)
-        
         probs = jax.nn.softmax(prior_logits, axis=-1)
         noise = jax.random.dirichlet(
             noise_key, alpha=jnp.full_like(probs, self.dirichlet_alpha)
         )
-        noisy_probs = (
-            (1 - self.dirichlet_fraction) * probs + self.dirichlet_fraction * noise
-        )
-        noisy_logits = jnp.log(noisy_probs)
-        
-        return mcts_key, noisy_logits
+        noisy_probs = (1 - self.dirichlet_fraction) * probs + self.dirichlet_fraction * noise
+        return mcts_key, jnp.log(noisy_probs)
 
     @abstractmethod
-    def _recurrent_fn(self, params, rng_key, action, embedding):
-        """
-        Defines a single-step, batched rollout within the MCTS search.
-
-        This abstract method must be implemented by subclasses to define the
-        specifics of the environment dynamics according to the model.
-        """
+    def _recurrent_fn(
+        self, params, rng_key: chex.Array, action: chex.Array, embedding
+    ):
+        """Single-step batched rollout used inside the MCTS simulations."""
         pass
 
     @abstractmethod
-    def _plan_loop(self, params, rng_key, observation: jnp.ndarray) -> MCTSPlanOutput:
-        """
-        The main planning logic that orchestrates the MCTS search.
-
-        This abstract method must be implemented by subclasses. It will contain
-        the core algorithm for running the search (e.g., looping over agents
-        independently or performing a joint search).
-        """
+    def _plan_loop(
+        self, params, rng_key: chex.Array, observation: chex.Array
+    ) -> MCTSPlanOutput:
+        """Full planning logic for one environment step."""
         pass
-    
-    def plan(self, params, rng_key, observation: jnp.ndarray) -> MCTSPlanOutput:
-        """
-        Public-facing method to execute the JIT-compiled planning process.
 
-        This method should not be overridden. It ensures that the JIT-compiled
-        version of the planning loop is always called.
+    def plan(
+        self, params, rng_key: chex.Array, observation: chex.Array
+    ) -> MCTSPlanOutput:
         """
-        if self.plan_jit is None:
-            raise NotImplementedError(
-                "Subclasses of MCTSPlanner must define `self.plan_jit` in their `__init__` method. "
-                "This is typically done with `self.plan_jit = jax.jit(self._plan_loop)`."
-            )
-        return self.plan_jit(params, rng_key, observation)
+        Public entry point. JIT compilation is the caller's responsibility
+        (DataActor wraps this with jax.jit at construction time).
+        """
+        return self._plan_loop(params, rng_key, observation)

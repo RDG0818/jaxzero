@@ -269,7 +269,6 @@ class DataActor:
         import chex
         from mcts.mcts_independent import MCTSIndependentPlanner
         from mcts.mcts_joint import MCTSJointPlanner
-        from mcts.mcts_sequential import MCTSSequentialPlanner
         from utils.mpe_env_wrapper import MPEEnvWrapper
         from model.model import FlaxMAMuZeroNet
         
@@ -289,9 +288,15 @@ class DataActor:
         model = FlaxMAMuZeroNet(CONFIG.model, self.env_wrapper.action_space_size)
         
         # MCTS planner setup
-        planner_classes = {"independent": MCTSIndependentPlanner, "joint": MCTSJointPlanner,"sequential": MCTSSequentialPlanner}
-        if CONFIG.mcts.planner_mode not in planner_classes: raise ValueError(f"Invalid planner mode: {CONFIG.mcts.planner_mode}")
+        planner_classes = {
+            "independent": MCTSIndependentPlanner,
+            "joint": MCTSJointPlanner,
+        }
+        if CONFIG.mcts.planner_mode not in planner_classes:
+            raise ValueError(f"Invalid planner_mode '{CONFIG.mcts.planner_mode}'. "
+                             f"Choose from: {list(planner_classes)}")
         planner = planner_classes[CONFIG.mcts.planner_mode](model=model, config=CONFIG)
+        # JIT here is the single compilation boundary — planners do not self-JIT.
         self.plan_fn = jax.jit(planner.plan)
 
         logger.info("Setup complete.")
