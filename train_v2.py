@@ -82,9 +82,13 @@ class LearnerActor:
     """
 
     def __init__(self, obs_size: int, action_size: int, replay_buffer_actor):
-        # Must be set before importing JAX so XLA picks up the memory cap.
+        # Must be set before importing JAX so XLA picks up these settings.
         # Ray automatically sets CUDA_VISIBLE_DEVICES for num_gpus=1 actors.
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.70"
+        # Suppress XLA GEMM autotuner "all configs filtered" spam.
+        os.environ["XLA_FLAGS"] = (
+            os.environ.get("XLA_FLAGS", "") + " --xla_gpu_autotune_level=0"
+        )
 
         import jax
         import jax.numpy as jnp
@@ -581,6 +585,9 @@ def run_training_loop(
 # ---------------------------------------------------------------------------
 
 def main():
+    # Opt into future Ray behavior: don't override CUDA_VISIBLE_DEVICES for
+    # zero-GPU workers. We manage device visibility ourselves in each actor.
+    os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
     ray.init(ignore_reinit_error=True)
     logger.info(f"Ray resources: {ray.available_resources()}")
 
