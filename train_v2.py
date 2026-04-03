@@ -326,8 +326,11 @@ class DataActor:
         learner_actor,
         replay_buffer_actor,
     ):
-        # Force CPU — must be set before importing JAX so XLA targets CPU only.
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        # Force CPU backend. JAX_PLATFORMS=cpu is sufficient — do NOT hide devices
+        # with CUDA_VISIBLE_DEVICES="" because the CUDA plugin calls cuInit() before
+        # JAX_PLATFORMS is checked and raises CUDA_ERROR_NO_DEVICE if no devices
+        # are visible. Leaving CUDA visible lets cuInit succeed; JAX_PLATFORMS then
+        # selects CPU as the only active backend and no GPU memory is allocated.
         os.environ["JAX_PLATFORMS"] = "cpu"
 
         import jax
@@ -440,8 +443,7 @@ def _fetch_env_metadata() -> Tuple[int, int]:
     is never initialized in the main process, preserving GPU memory for the
     LearnerActor.
     """
-    # Force CPU so this short-lived task does not allocate GPU memory.
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # Same reasoning as DataActor: use JAX_PLATFORMS=cpu, not CUDA_VISIBLE_DEVICES="".
     os.environ["JAX_PLATFORMS"] = "cpu"
     from utils.mpe_env_wrapper import MPEEnvWrapper
 
