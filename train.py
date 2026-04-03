@@ -162,7 +162,7 @@ class LearnerActor:
 
             # Unrolled Loss Calculations
             for i in range(U):
-                online_proj = model.apply({'params': p}, hidden, True, method=model.project)
+                online_proj = model.apply({'params': p}, hidden, method=model.project_online)
                 ai = batch.actions[:, i] # (B, N)
 
                 model_output = model.apply(
@@ -178,7 +178,7 @@ class LearnerActor:
                 policy_loss += optax.softmax_cross_entropy(pi_logits, batch.policy_target[:, i+1]).mean(axis=-1)
                 value_loss += utils.categorical_cross_entropy_loss(vi_logits, value_target_dist[:, i+1])
 
-                target_proj = model.apply({'params': p}, hidden, False, method=model.project)
+                target_proj = model.apply({'params': p}, hidden, method=model.project_target)
                 target_proj = jax.lax.stop_gradient(target_proj)
 
                 B, N, D = online_proj.shape
