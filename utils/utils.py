@@ -75,18 +75,4 @@ def support_to_scalar(distribution: jnp.ndarray, support: DiscreteSupport, use_l
     return _h_inv(scalar)
 
 
-def categorical_cross_entropy_loss(prediction_logits: jnp.ndarray, target_distribution: jnp.ndarray) -> jnp.ndarray:
-    """
-    Calculates the cross-entropy loss between predicted logits and a target distribution.
-    This is the standard loss function for the value and reward heads when using categorical representation.
-    Equivalent to `optax.softmax_cross_entropy`.
-    
-    Args:
-        prediction_logits: The raw output from the model's prediction head.
-        target_distribution: The target probability distribution created by `scalar_to_support`.
-
-    Returns:
-        The loss for each item in the batch.
-    """
-    return -(jax.nn.log_softmax(prediction_logits, axis=-1) * target_distribution).sum(-1)
 

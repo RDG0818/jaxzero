@@ -1,10 +1,9 @@
 # replay_buffer.py
-from collections import deque
-import random
-import numpy as np 
+import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from jax import tree_util
+
 
 @dataclass
 class Transition:
@@ -19,6 +18,7 @@ class Transition:
     value_target: float
     agent_order: np.ndarray
 
+
 @dataclass
 class Episode:
     """
@@ -28,79 +28,82 @@ class Episode:
     episode_return: float = 0.0
 
     def add_step(self, transition: Transition):
-        """A clean method to add a step to the episode's trajectory."""
         self.trajectory.append(transition)
         self.episode_return += transition.reward
+
 
 @dataclass
 class ReplayItem:
     """
     A single, self-contained training sample for the MuZero model.
-    """
 
-    observation: np.ndarray
-    actions: np.ndarray  # Shape: (unroll_steps, action_space_size)
-    target_observation: np.ndarray
-    policy_target: np.ndarray    # Shape: (unroll_steps + 1, action_space_size)
-    value_target: np.ndarray     # Shape: (unroll_steps + 1,)
-    reward_target: np.ndarray    # Shape: (unroll_steps,)
-    agent_order: np.ndarray
+    Shapes (using shorthand):
+        B = batch_size, U = unroll_steps, N = num_agents, A = action_space_size
+    """
+    observation: np.ndarray    # (B, N, obs_size)
+    actions: np.ndarray        # (B, U, N)
+    policy_target: np.ndarray  # (B, U+1, N, A)
+    value_target: np.ndarray   # (B, U+1, N)
+    reward_target: np.ndarray  # (B, U, N)
+    agent_order: np.ndarray    # (B, N)
+
 
 def flatten_replay_item(item: ReplayItem):
-    """
-    Defines how to flatten the ReplayItem.
-    Returns a tuple of the dynamic children and a tuple of the static data.
-    """
     children = (
         item.observation,
         item.actions,
-        item.target_observation,
         item.policy_target,
         item.value_target,
         item.reward_target,
         item.agent_order,
     )
-    # No static data needed for this class, so we return None.
-    static_data = None
-    return children, static_data
+    return children, None
+
 
 def unflatten_replay_item(static_data, children):
-    """
-    Defines how to unflatten the ReplayItem from its children.
-    """
-    # The order must match the order in flatten_replay_item
     return ReplayItem(
         observation=children[0],
         actions=children[1],
-        target_observation=children[2],
-        policy_target=children[3],
-        value_target=children[4],
-        reward_target=children[5],
-        agent_order=children[6],
+        policy_target=children[2],
+        value_target=children[3],
+        reward_target=children[4],
+        agent_order=children[5],
     )
+
 
 tree_util.register_pytree_node(
     ReplayItem,
     flatten_replay_item,
-    unflatten_replay_item
+    unflatten_replay_item,
 )
+
 
 class ReplayBuffer:
     """
-    A replay buffer with prioritized experience replay.
+    A replay buffer with prioritized experience replay (PER).
     """
-    def __init__(self, capacity: int, observation_space: Tuple, action_space_size: int, num_agents: int, unroll_steps: int,
-                 alpha: float, beta_start: float, beta_frames: int):
+
+    def __init__(
+        self,
+        capacity: int,
+        observation_shape: Tuple,
+        action_space_size: int,
+        num_agents: int,
+        unroll_steps: int,
+        alpha: float,
+        beta_start: float,
+        beta_frames: int,
+    ):
         """
-        Initializes the ReplayBuffer.
         Args:
-            capacity: The maximum number of items to store in the buffer.
-            observation_space: The shape of a single observation.
-            num_agents: The number of agents
-            unroll_steps: The number of steps to unroll for each training sample.
-            alpha: The exponent for calculating priorities. 0 means uniform sampling.
-            beta_start: The initial value of beta for importance sampling.
-            beta_frames: The number of frames over which to anneal beta to 1.0.
+            capacity: Maximum number of items to store.
+            observation_shape: Shape of a single agent's observation, e.g. (obs_size,).
+            action_space_size: Number of discrete actions per agent.
+            num_agents: Number of agents.
+            unroll_steps: Number of steps unrolled per training sample.
+            alpha: Priority exponent. 0 = uniform sampling.
+            beta_start: Initial importance-sampling exponent.
+            beta_frames: Frames over which beta anneals to 1.0.
         """
         self.capacity = capacity
         self.alpha = alpha
@@ -108,9 +111,8 @@ class ReplayBuffer:
         self.beta_frames = beta_frames
         self.frame_count = 0
 
-        self.observations = np.zeros((capacity, num_agents, *observation_space), dtype=np.float32)
+        self.observations = np.zeros((capacity, num_agents, *observation_shape), dtype=np.float32)
         self.actions = np.zeros((capacity, unroll_steps, num_agents), dtype=np.int32)
-        self.target_observations = np.zeros((capacity, *observation_space), dtype=np.float32)
         self.policy_targets = np.zeros((capacity, unroll_steps + 1, num_agents, action_space_size), dtype=np.float32)
         self.value_targets = np.zeros((capacity, unroll_steps + 1, num_agents), dtype=np.float32)
         self.reward_targets = np.zeros((capacity, unroll_steps, num_agents), dtype=np.float32)
@@ -121,15 +123,9 @@ class ReplayBuffer:
         self.size = 0
 
     def add(self, item: ReplayItem, priority: float):
-        """
-        Adds a new ReplayItem to the buffer.
-        Args:
-            item: The ReplayItem to add.
-            priority: The initial priority for the item.
-        """
+        """Adds a ReplayItem to the buffer, overwriting the oldest entry when full."""
         self.observations[self.pointer] = item.observation
         self.actions[self.pointer] = item.actions
-        self.target_observations[self.pointer] = item.target_observation
         self.policy_targets[self.pointer] = item.policy_target
         self.value_targets[self.pointer] = item.value_target
         self.reward_targets[self.pointer] = item.reward_target
@@ -140,21 +136,17 @@ class ReplayBuffer:
         self.size = min(self.size + 1, self.capacity)
 
     def _get_beta(self) -> float:
-        """Calculates the current value of beta."""
+        """Returns the current importance-sampling exponent (does not mutate state)."""
         beta = self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames
-        self.frame_count += 1
         return min(1.0, beta)
 
     def sample(self, batch_size: int) -> Tuple[ReplayItem, np.ndarray, np.ndarray]:
         """
-        Samples a batch of ReplayItems from the buffer using prioritized sampling.
-        Args:
-            batch_size: The number of items to sample.
+        Samples a batch using prioritized experience replay.
+
         Returns:
-            A tuple containing:
-                - A ReplayItem containing the batched data.
-                - The importance sampling weights for the batch.
-                - The indices of the sampled items.
+            (batch, importance_weights, indices)
+            Returns (None, None, None) if the buffer is empty.
         """
         if self.size == 0:
             return None, None, None
@@ -165,37 +157,106 @@ class ReplayBuffer:
 
         indices = np.random.choice(self.size, batch_size, p=probs)
         beta = self._get_beta()
+        self.frame_count += 1
+
         weights = (self.size * probs[indices]) ** (-beta)
         weights /= weights.max()
 
-        # B = batch_size
-        # U = unroll_steps
-        # O = observation_shape 
-        # A = action_space_size
-        # N = number of agents
-        # value = dimension of the value (typically 1)
-        # reward = dimension of the reward (typically 1)
-
         batch = ReplayItem(
-            observation=self.observations[indices], # Shape: (B, *O)
-            actions=self.actions[indices], # Shape: (B, U, A)
-            target_observation=self.target_observations[indices], # Shape: (B, *O)
-            policy_target=self.policy_targets[indices], # Shape: (B, U+1, A)
-            value_target=self.value_targets[indices], # Shape (B, U+1, N, value)
-            reward_target=self.reward_targets[indices], # Shape (B, U, N, reward)
+            observation=self.observations[indices],
+            actions=self.actions[indices],
+            policy_target=self.policy_targets[indices],
+            value_target=self.value_targets[indices],
+            reward_target=self.reward_targets[indices],
             agent_order=self.agent_orders[indices],
         )
 
         return batch, weights, indices
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        """
-        Updates the priorities of the sampled items.
-        Args:
-            indices: The indices of the items to update.
-            priorities: The new priorities for the items.
-        """
+        """Updates priorities for previously sampled indices."""
         self.priorities[indices] = priorities
 
     def __len__(self):
         return self.size
+
+
+# ---------------------------------------------------------------------------
+# Episode processing
+# ---------------------------------------------------------------------------
+
+def process_episode(
+    episode: "Episode",
+    unroll_steps: int,
+    n_step: int,
+    discount_gamma: float,
+    num_agents: int,
+) -> list:
+    """
+    Converts a completed episode into ReplayItems via a sliding window.
+
+    For each valid start position, computes n-step bootstrapped value targets
+    and packs `unroll_steps` transitions into a single ReplayItem.
+
+    Args:
+        episode: Completed episode containing a trajectory of Transitions.
+        unroll_steps: Number of steps per training sample (U).
+        n_step: Lookahead horizon for bootstrapped value targets.
+        discount_gamma: Discount factor γ.
+        num_agents: Number of agents N (for broadcasting scalar targets).
+
+    Returns:
+        List of ReplayItems, one per valid start index.
+        Empty list if the episode is too short to produce any samples.
+    """
+    trajectory = episode.trajectory
+    ep_len = len(trajectory)
+
+    if ep_len <= unroll_steps:
+        return []
+
+    # Extract arrays once to avoid repeated attribute lookups in the loop.
+    observations = np.stack([t.observation for t in trajectory])      # (T, N, obs_size)
+    actions = np.stack([t.action for t in trajectory])                # (T, N)
+    policy_targets = np.stack([t.policy_target for t in trajectory])  # (T, N, A)
+    rewards = np.array([t.reward for t in trajectory], dtype=np.float32)      # (T,)
+    mcts_values = np.array([t.value_target for t in trajectory], dtype=np.float32)  # (T,)
+    agent_orders = np.stack([t.agent_order for t in trajectory])      # (T, N)
+
+    # Pre-compute discount coefficients [γ^0, γ^1, ..., γ^(n-1)] for np.dot.
+    discount_vec = discount_gamma ** np.arange(n_step, dtype=np.float32)
+
+    replay_items = []
+    for start in range(ep_len - unroll_steps):
+        # Compute n-step bootstrapped value target for each of the U+1 positions.
+        value_targets = np.empty(unroll_steps + 1, dtype=np.float32)
+        for i in range(unroll_steps + 1):
+            t = start + i
+            window = rewards[t : t + n_step]
+            value_targets[i] = np.dot(window, discount_vec[: len(window)])
+            bootstrap_idx = t + n_step
+            if bootstrap_idx < ep_len:
+                value_targets[i] += mcts_values[bootstrap_idx] * (discount_gamma ** n_step)
+
+        # Broadcast scalar value/reward targets to per-agent arrays.
+        # np.broadcast_to returns a read-only view; .copy() makes it writable.
+        value_target_per_agent = np.broadcast_to(
+            value_targets[:, None], (unroll_steps + 1, num_agents)
+        ).copy().astype(np.float32)  # (U+1, N)
+
+        reward_target_per_agent = np.broadcast_to(
+            rewards[start : start + unroll_steps, None], (unroll_steps, num_agents)
+        ).copy().astype(np.float32)  # (U, N)
+
+        replay_items.append(
+            ReplayItem(
+                observation=observations[start],                                    # (N, obs_size)
+                actions=actions[start : start + unroll_steps],                     # (U, N)
+                policy_target=policy_targets[start : start + unroll_steps + 1],   # (U+1, N, A)
+                value_target=value_target_per_agent,                               # (U+1, N)
+                reward_target=reward_target_per_agent,                             # (U, N)
+                agent_order=agent_orders[start],                                   # (N,)
+            )
+        )
+
+    return replay_items
