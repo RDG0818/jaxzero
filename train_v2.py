@@ -85,10 +85,11 @@ class LearnerActor:
         # Must be set before importing JAX so XLA picks up these settings.
         # Ray automatically sets CUDA_VISIBLE_DEVICES for num_gpus=1 actors.
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.70"
-        # Suppress XLA GEMM autotuner "all configs filtered" spam.
-        os.environ["XLA_FLAGS"] = (
-            os.environ.get("XLA_FLAGS", "") + " --xla_gpu_autotune_level=0"
-        )
+        # Suppress XLA C++ WARNING-level logs (e.g. GEMM autotuner spam).
+        # XLA inherits TF_CPP_MIN_LOG_LEVEL from its TF lineage: 0=INFO,
+        # 1=WARNING, 2=ERROR, 3=FATAL. Setting 2 keeps errors visible.
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+        os.environ["GLOG_minloglevel"] = "2"
 
         import jax
         import jax.numpy as jnp
