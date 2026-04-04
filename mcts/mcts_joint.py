@@ -101,21 +101,23 @@ class MCTSJointPlanner(MCTSPlanner):
         )
 
         # Decode the chosen flat joint action index back to per-agent actions.
+        # unravel_index returns a tuple of N arrays each of shape (B,).
+        # Stack along last axis to get (B, N).
         joint_action_tuple = jnp.unravel_index(
             policy_output.action, self.joint_action_shape
         )
-        final_joint_action = jnp.array(joint_action_tuple).squeeze(axis=-1)
+        final_joint_action = jnp.stack(joint_action_tuple, axis=-1)  # (B, N)
 
         # Convert the joint policy target distribution to per-agent marginals for training.
         marginal_policy_targets = self._joint_policy_to_marginal(
-            policy_output.action_weights[None, :]
-        ).squeeze(0)
+            policy_output.action_weights
+        )   # (B, N, A)
 
         return MCTSPlanOutput(
-            joint_action=final_joint_action,
-            policy_targets=marginal_policy_targets,
-            root_value=root_value.squeeze().astype(float),
-            agent_order=jnp.arange(self.num_agents),
+            joint_action=final_joint_action,            # (B, N)
+            policy_targets=marginal_policy_targets,     # (B, N, A)
+            root_value=root_value,                      # (B,)
+            agent_order=jnp.arange(self.num_agents),   # (N,)
         )
 
     def _logits_to_joint_logits(self, logits: chex.Array) -> chex.Array:

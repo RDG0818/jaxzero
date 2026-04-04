@@ -65,3 +65,73 @@ class MPEEnvWrapper:
         """Stacks per-agent data into shape (1, num_agents, *data_shape)."""
         data_list = [np.asarray(data_dict[agent], dtype=np.float32) for agent in self.agents]
         return np.stack(data_list, axis=0)[np.newaxis, ...]
+
+
+class VecMPEEnvWrapper:
+    """
+    Vectorized wrapper for JaxMARL MPE environments.
+
+    Runs `num_envs` environments in parallel via jax.vmap. All outputs are
+    JAX arrays with a leading batch dimension of size `num_envs`.
+    """
+
+    def __init__(self, env_name: str, num_agents: int, max_steps: int, num_envs: int):
+        self.env = jaxmarl.make(env_name, num_agents=num_agents)
+        self.num_envs: int = num_envs
+        self.num_agents: int = num_agents
+        self.agents: List[str] = self.env.agents
+        self.observation_size: int = self.env.observation_space(self.agents[0]).shape[0]
+        self.observation_shape: Tuple[int, ...] = (self.observation_size,)
+        self.action_space_size: int = self.env.action_space(self.agents[0]).n
+
+        self._reset_fn = jax.vmap(self.env.reset)
+        self._step_fn = jax.vmap(self.env.step)
+
+    def reset(self, rng_keys: jax.Array) -> Tuple[jnp.ndarray, Any]:
+        """
+        Resets num_envs environments.
+
+        Args:
+            rng_keys: Shape (num_envs, 2)
+
+        Returns:
+            observations: Shape (num_envs, num_agents, observation_size)
+            states: Batched environment states (pytree with leading num_envs axis).
+        """
+        obs_dict, states = self._reset_fn(rng_keys)
+        return self._stack_obs(obs_dict), states
+
+    def step(
+        self, rng_keys: jax.Array, states: Any, actions: jnp.ndarray
+    ) -> Tuple[jnp.ndarray, Any, jnp.ndarray, jnp.ndarray]:
+        """
+        Steps num_envs environments.
+
+        Args:
+            rng_keys: Shape (num_envs, 2)
+            states: Batched environment states.
+            actions: Shape (num_envs, num_agents) — integer action indices.
+
+        Returns:
+            next_observations: Shape (num_envs, num_agents, observation_size)
+            next_states: Batched environment states.
+            team_rewards: Shape (num_envs,) — summed reward across agents.
+            episode_dones: Shape (num_envs,) — True when all agents are done.
+        """
+        action_dicts = {
+            agent: jnp.asarray(actions[:, i], dtype=jnp.int32)
+            for i, agent in enumerate(self.agents)
+        }
+        next_obs_dict, next_states, rewards_dict, dones_dict, _ = self._step_fn(
+            rng_keys, states, action_dicts
+        )
+        next_obs = self._stack_obs(next_obs_dict)
+        rewards = jnp.stack([rewards_dict[a] for a in self.agents], axis=-1).sum(axis=-1)
+        dones = jnp.stack([dones_dict[a] for a in self.agents], axis=-1).all(axis=-1)
+        return next_obs, next_states, rewards, dones
+
+    def _stack_obs(self, obs_dict: Dict[str, jnp.ndarray]) -> jnp.ndarray:
+        """Stacks per-agent observations into shape (num_envs, num_agents, obs_size)."""
+        return jnp.stack(
+            [obs_dict[agent].astype(jnp.float32) for agent in self.agents], axis=1
+        )

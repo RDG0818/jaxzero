@@ -126,16 +126,19 @@ class MCTSIndependentPlanner(MCTSPlanner):
                     mctx.qtransform_completed_by_mix_value, use_mixed_value=True
                 ),
             )
-            search_value = out.search_tree.summary().value.squeeze()
-            return carry, (out.action.squeeze(0), out.action_weights.squeeze(0), search_value)
+            search_value = out.search_tree.summary().value  # (B,)
+            return carry, (out.action, out.action_weights, search_value)
 
         # carry=None because each agent's search is independent — no state flows between them.
         _, results = jax.lax.scan(agent_step, None, (keys, idxs))
         actions, weights, search_values = results
+        # actions: (N, B) — scan stacks per-agent outputs along axis 0
+        # weights: (N, B, A)
+        # search_values: (N, B)
 
         return MCTSPlanOutput(
-            joint_action=actions,
-            policy_targets=weights,
-            root_value=jnp.mean(search_values).astype(float),
-            agent_order=jnp.arange(self.num_agents),
+            joint_action=jnp.moveaxis(actions, 0, 1),       # (B, N)
+            policy_targets=jnp.moveaxis(weights, 0, 1),     # (B, N, A)
+            root_value=jnp.mean(search_values, axis=0),     # (B,)
+            agent_order=jnp.arange(self.num_agents),        # (N,)
         )

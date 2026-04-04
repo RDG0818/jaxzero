@@ -117,14 +117,14 @@ class TestMCTSIndependentPlanner:
     def test_joint_action_shape(self, independent_plan_fn, params, obs):
         plan_fn, _ = independent_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert out.joint_action.shape == (N,), \
-            f"Expected (N,)={(N,)}, got {out.joint_action.shape}"
+        assert out.joint_action.shape == (1, N), \
+            f"Expected (B=1, N)={(1, N)}, got {out.joint_action.shape}"
 
     def test_policy_targets_shape(self, independent_plan_fn, params, obs):
         plan_fn, _ = independent_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert out.policy_targets.shape == (N, A), \
-            f"Expected (N, A)={(N, A)}, got {out.policy_targets.shape}"
+        assert out.policy_targets.shape == (1, N, A), \
+            f"Expected (B=1, N, A)={(1, N, A)}, got {out.policy_targets.shape}"
 
     def test_actions_in_valid_range(self, independent_plan_fn, params, obs):
         plan_fn, _ = independent_plan_fn
@@ -136,8 +136,8 @@ class TestMCTSIndependentPlanner:
         """Gumbel MuZero action_weights are a probability distribution over actions."""
         plan_fn, _ = independent_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        sums = jnp.sum(out.policy_targets, axis=-1)  # (N,)
-        assert jnp.allclose(sums, jnp.ones(N), atol=1e-5), \
+        sums = jnp.sum(out.policy_targets, axis=-1)  # (1, N)
+        assert jnp.allclose(sums, jnp.ones((1, N)), atol=1e-5), \
             f"Policy targets must sum to 1 per agent, got: {sums}"
 
     def test_agent_order_is_sequential(self, independent_plan_fn, params, obs):
@@ -146,10 +146,11 @@ class TestMCTSIndependentPlanner:
         assert jnp.array_equal(out.agent_order, jnp.arange(N)), \
             f"Expected sequential order {jnp.arange(N)}, got {out.agent_order}"
 
-    def test_root_value_is_scalar(self, independent_plan_fn, params, obs):
+    def test_root_value_shape(self, independent_plan_fn, params, obs):
         plan_fn, _ = independent_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert jnp.ndim(out.root_value) == 0, "root_value should be a scalar"
+        assert out.root_value.shape == (1,), \
+            f"Expected (B=1,), got {out.root_value.shape}"
 
     def test_deterministic_with_same_key(self, independent_plan_fn, params, obs):
         plan_fn, _ = independent_plan_fn
@@ -182,9 +183,9 @@ class TestMCTSIndependentPlanner:
         obs_1 = jnp.ones((1, 1, OBS))
         params = net.init(jax.random.PRNGKey(0), obs_1)["params"]
         out = plan_fn(params, jax.random.PRNGKey(0), obs_1)
-        assert out.joint_action.shape == (1,)
-        assert out.policy_targets.shape == (1, A)
-        assert int(out.joint_action[0]) < A
+        assert out.joint_action.shape == (1, 1)   # (B=1, N=1)
+        assert out.policy_targets.shape == (1, 1, A)
+        assert int(out.joint_action[0, 0]) < A
 
     def test_argmax_mode(self, model_and_params, test_config):
         """independent_argmax=True: other agents fixed to argmax(prior)."""
@@ -196,7 +197,7 @@ class TestMCTSIndependentPlanner:
         )
         planner = MCTSIndependentPlanner(model=net, config=cfg)
         out = jax.jit(planner.plan)(params, jax.random.PRNGKey(0), jnp.ones((1, N, OBS)))
-        assert out.joint_action.shape == (N,)
+        assert out.joint_action.shape == (1, N)
         assert jnp.all(out.joint_action < A)
 
     def test_sample_mode(self, model_and_params, test_config):
@@ -209,7 +210,7 @@ class TestMCTSIndependentPlanner:
         )
         planner = MCTSIndependentPlanner(model=net, config=cfg)
         out = jax.jit(planner.plan)(params, jax.random.PRNGKey(0), jnp.ones((1, N, OBS)))
-        assert out.joint_action.shape == (N,)
+        assert out.joint_action.shape == (1, N)
         assert jnp.all(out.joint_action < A)
 
 
@@ -225,12 +226,12 @@ class TestMCTSJointPlanner:
     def test_joint_action_shape(self, joint_plan_fn, params, obs):
         plan_fn, _ = joint_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert out.joint_action.shape == (N,)
+        assert out.joint_action.shape == (1, N)
 
     def test_policy_targets_shape(self, joint_plan_fn, params, obs):
         plan_fn, _ = joint_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert out.policy_targets.shape == (N, A)
+        assert out.policy_targets.shape == (1, N, A)
 
     def test_actions_in_valid_range(self, joint_plan_fn, params, obs):
         plan_fn, _ = joint_plan_fn
@@ -242,14 +243,15 @@ class TestMCTSJointPlanner:
         """Marginal policy targets should sum to 1 per agent."""
         plan_fn, _ = joint_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        sums = jnp.sum(out.policy_targets, axis=-1)  # (N,)
-        assert jnp.allclose(sums, jnp.ones(N), atol=1e-5), \
+        sums = jnp.sum(out.policy_targets, axis=-1)  # (1, N)
+        assert jnp.allclose(sums, jnp.ones((1, N)), atol=1e-5), \
             f"Marginal policy targets must sum to 1 per agent, got: {sums}"
 
-    def test_root_value_is_scalar(self, joint_plan_fn, params, obs):
+    def test_root_value_shape(self, joint_plan_fn, params, obs):
         plan_fn, _ = joint_plan_fn
         out = plan_fn(params, jax.random.PRNGKey(0), obs)
-        assert jnp.ndim(out.root_value) == 0
+        assert out.root_value.shape == (1,), \
+            f"Expected (B=1,), got {out.root_value.shape}"
 
     def test_deterministic_with_same_key(self, joint_plan_fn, params, obs):
         plan_fn, _ = joint_plan_fn
@@ -364,5 +366,5 @@ class TestMCTSJointPlanner:
         obs_1 = jnp.ones((1, 1, OBS))
         params = net.init(jax.random.PRNGKey(0), obs_1)["params"]
         out = plan_fn(params, jax.random.PRNGKey(0), obs_1)
-        assert out.joint_action.shape == (1,)
-        assert int(out.joint_action[0]) < A
+        assert out.joint_action.shape == (1, 1)   # (B=1, N=1)
+        assert int(out.joint_action[0, 0]) < A

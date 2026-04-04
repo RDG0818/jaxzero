@@ -15,10 +15,10 @@ from utils.transforms import DiscreteSupport
 class MCTSPlanOutput(NamedTuple):
     """Output of any MCTS planner for a single planning step.
 
-    Shapes (N=agents, A=actions):
-        joint_action:   (N,)    — chosen action index per agent
-        policy_targets: (N, A)  — MCTS-improved policy targets for training
-        root_value:     scalar  — estimated value of the root state
+    Shapes (B=batch/envs, N=agents, A=actions):
+        joint_action:   (B, N)  — chosen action index per agent
+        policy_targets: (B, N, A) — MCTS-improved policy targets for training
+        root_value:     (B,)    — estimated value of the root state
         agent_order:    (N,)    — order agents were planned in (for sequential planners)
     """
     joint_action:   chex.Array

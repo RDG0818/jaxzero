@@ -66,6 +66,7 @@ class TrainConfig:
     project_name: str = "myzero1"
     checkpoint_dir: str = "checkpoints"
     checkpoint_interval: int = 1000
+    num_envs_per_actor: int = 4  # number of parallel environments per DataActor
     debug: bool = False
     debug_interval: int = 100  # emit detailed debug logs every N learner training steps
 

@@ -36,7 +36,7 @@ class DataActor:
         import jax
         from model import FlaxMAMuZeroNet
         from mcts import MCTSIndependentPlanner, MCTSJointPlanner
-        from envs import MPEEnvWrapper
+        from envs import VecMPEEnvWrapper
 
         self.actor_id = actor_id
         self.config = config
@@ -46,10 +46,11 @@ class DataActor:
 
         self.rng_key = jax.random.PRNGKey(actor_id * 1337 + 7)
 
-        self.env = MPEEnvWrapper(
+        self.env = VecMPEEnvWrapper(
             config.train.env_name,
             config.train.num_agents,
             config.train.max_episode_steps,
+            config.train.num_envs_per_actor,
         )
 
         model = FlaxMAMuZeroNet(config.model, action_size)
@@ -71,90 +72,125 @@ class DataActor:
 
     def run_episode(self) -> float:
         """
-        Runs one episode, processes it into ReplayItems, ships to buffer.
-        Returns the undiscounted episode return.
+        Runs num_envs_per_actor episodes in parallel, processes them into
+        ReplayItems, and ships them to the buffer.
+        Returns the mean undiscounted episode return across all envs.
         """
         import jax
+        import jax.numpy as jnp
         from utils.replay_buffer import Episode, Transition, process_episode
 
+        B = self.config.train.num_envs_per_actor
         debug = self.config.train.debug
         ep_start = time.monotonic()
 
-        self.rng_key, reset_key = jax.random.split(self.rng_key)
-        observation, state = self.env.reset(reset_key)
-        episode = Episode()
+        # Reset all B envs simultaneously.
+        self.rng_key, *reset_keys_list = jax.random.split(self.rng_key, B + 1)
+        reset_keys = jnp.stack(reset_keys_list)  # (B, 2)
+        observations, states = self.env.reset(reset_keys)
+        # observations: (B, N, obs_size)
+
+        episodes = [Episode() for _ in range(B)]
+        active = [True] * B
 
         plan_times = []
-        root_values = []
+        root_values_per_env = [[] for _ in range(B)]
 
         for _ in range(self.config.train.max_episode_steps):
             self.rng_key, plan_key, step_key = jax.random.split(self.rng_key, 3)
 
             t_plan = time.monotonic()
-            plan_output = self.plan_fn(self.params, plan_key, observation)
+            plan_output = self.plan_fn(self.params, plan_key, observations)
             plan_times.append(time.monotonic() - t_plan)
 
-            action_np = np.array(plan_output.joint_action)
+            # plan_output.joint_action:   (B, N)
+            # plan_output.policy_targets: (B, N, A)
+            # plan_output.root_value:     (B,)
+            actions_np = np.array(plan_output.joint_action)       # (B, N)
+            root_values_np = np.array(plan_output.root_value)     # (B,)
+            policy_targets_np = np.array(plan_output.policy_targets)  # (B, N, A)
 
             if debug:
-                root_values.append(float(plan_output.root_value))
-                policy_targets = np.array(plan_output.policy_targets)
-                if np.isnan(policy_targets).any() or np.isnan(action_np).any():
+                for i in range(B):
+                    if active[i]:
+                        root_values_per_env[i].append(float(root_values_np[i]))
+                if np.isnan(policy_targets_np).any() or np.isnan(actions_np).any():
                     logger.warning(
-                        f"(DataActor {self.actor_id}) NaN detected in plan output at step {len(episode.trajectory)}"
+                        f"(DataActor {self.actor_id}) NaN detected in plan output"
                     )
 
-            next_obs, next_state, reward, done = self.env.step(step_key, state, action_np)
-
-            episode.add_step(
-                Transition(
-                    observation=observation[0],  # (N, obs_size) — drop batch dim
-                    action=action_np,
-                    reward=reward,
-                    done=done,
-                    policy_target=np.array(plan_output.policy_targets),
-                    value_target=float(plan_output.root_value),
-                    agent_order=np.array(plan_output.agent_order),
-                )
+            step_keys = jax.random.split(step_key, B)  # (B, 2)
+            next_obs, next_states, rewards, dones = self.env.step(
+                step_keys, states, actions_np
             )
-            observation = next_obs
-            state = next_state
-            if done:
+            rewards_np = np.array(rewards)  # (B,)
+            dones_np = np.array(dones)       # (B,)
+
+            for i in range(B):
+                if not active[i]:
+                    continue
+                episodes[i].add_step(
+                    Transition(
+                        observation=np.array(observations[i]),      # (N, obs_size)
+                        action=actions_np[i],                        # (N,)
+                        reward=float(rewards_np[i]),
+                        done=bool(dones_np[i]),
+                        policy_target=policy_targets_np[i],         # (N, A)
+                        value_target=float(root_values_np[i]),
+                        agent_order=np.array(plan_output.agent_order),  # (N,)
+                    )
+                )
+                if dones_np[i]:
+                    active[i] = False
+
+            observations = next_obs
+            states = next_states
+
+            if not any(active):
                 break
 
         if debug:
             ep_time = time.monotonic() - ep_start
-            ep_len = len(episode.trajectory)
+            ep_lengths = [len(ep.trajectory) for ep in episodes]
             mean_plan_ms = np.mean(plan_times) * 1000
-            mean_root_value = np.mean(root_values)
-            # Policy entropy: mean over steps and agents
-            all_targets = np.stack([t.policy_target for t in episode.trajectory])  # (T, N, A)
+            all_root_values = [v for vs in root_values_per_env for v in vs]
+            mean_root_value = float(np.mean(all_root_values)) if all_root_values else 0.0
+            all_targets = np.concatenate([
+                np.stack([t.policy_target for t in ep.trajectory])
+                for ep in episodes if ep.trajectory
+            ])  # (total_steps, N, A)
             p = np.clip(all_targets, 1e-8, None)
             policy_entropy = float(-np.sum(p * np.log(p), axis=-1).mean())
             logger.info(
                 f"(DataActor {self.actor_id}) "
-                f"ep_len={ep_len} return={episode.episode_return:.3f} "
+                f"envs={B} ep_len={np.mean(ep_lengths):.1f} "
+                f"return={np.mean([ep.episode_return for ep in episodes]):.3f} "
                 f"mean_root_value={mean_root_value:.3f} "
                 f"policy_entropy={policy_entropy:.3f} "
                 f"mean_plan={mean_plan_ms:.1f}ms "
                 f"ep_time={ep_time:.2f}s"
             )
 
-        items = process_episode(
-            episode,
-            self.config.train.unroll_steps,
-            self.config.train.n_step,
-            self.config.train.discount_gamma,
-            self.config.train.num_agents,
-        )
+        # Process all B episodes and ship to replay buffer.
+        all_items = []
+        for ep in episodes:
+            items = process_episode(
+                ep,
+                self.config.train.unroll_steps,
+                self.config.train.n_step,
+                self.config.train.discount_gamma,
+                self.config.train.num_agents,
+            )
+            all_items.extend(items)
 
-        if items:
-            self.replay_buffer.add.remote(items, [1.0] * len(items))
+        if all_items:
+            self.replay_buffer.add.remote(all_items, [1.0] * len(all_items))
 
-        self.episodes_since_update += 1
+        self.episodes_since_update += B
         if self.episodes_since_update >= self.config.train.param_update_interval:
             self.params = ray.get(self.learner.get_params.remote())
             self.episodes_since_update = 0
-            logger.info(f"(DataActor {self.actor_id}) Synced params from learner.")
+            if debug:
+                logger.info(f"(DataActor {self.actor_id}) Synced params from learner.")
 
-        return episode.episode_return
+        return float(np.mean([ep.episode_return for ep in episodes]))

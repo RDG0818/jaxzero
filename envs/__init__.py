@@ -1,1 +1,1 @@
-from envs.mpe_env_wrapper import MPEEnvWrapper
+from envs.mpe_env_wrapper import MPEEnvWrapper, VecMPEEnvWrapper
