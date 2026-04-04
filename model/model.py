@@ -176,13 +176,14 @@ class FlaxMAMuZeroNet(nn.Module):
     Multi-agent MuZero world model.
 
     Exposes three callable paths:
-      __call__           — initial inference (observation → latent + predictions)
+      __call__            — initial inference (observation → latent + predictions)
       recurrent_inference — dynamics unroll (latent + action → next latent + predictions)
-      predict            — prediction only, no dynamics (used by planners for prior policies)
+      predict             — prediction head only (used by MCTSIndependentPlanner for
+                            prior policies of non-searching agents during each search step)
 
-    And two projection methods for the SimSiam consistency loss:
+    And two projection methods for the EMA consistency loss:
       project_online  — projection + prediction head (current/online latent)
-      project_target  — projection only, no head (next/target latent, stop-grad'd by caller)
+      project_target  — projection only, no head (target latent, applied with EMA params)
     """
     config: ModelConfig
     action_space_size: int
@@ -288,7 +289,8 @@ class FlaxMAMuZeroNet(nn.Module):
     def predict(self, hidden_states: chex.Array) -> tuple[chex.Array, chex.Array]:
         """
         Runs only the prediction head (no dynamics).
-        Used by planners to get prior policies for non-searching agents during MCTS.
+        Used by MCTSIndependentPlanner to get prior policies for non-searching
+        agents during each agent's search step.
 
         Args:
             hidden_states: Latent states. Shape: (B, N, D_hidden)
@@ -310,6 +312,7 @@ class FlaxMAMuZeroNet(nn.Module):
     def project_target(self, hidden_state: chex.Array) -> chex.Array:
         """
         Target projection branch (projection only, no prediction head).
-        Applied to the next latent state; the caller is responsible for stop_gradient.
+        Applied to the next latent state using EMA parameters — called as
+        model.apply({"params": ema_params}, ...) so no stop_gradient is needed.
         """
         return self.projection_net(hidden_state)

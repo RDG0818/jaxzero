@@ -27,7 +27,7 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
     value_scale = config.train.value_scale
     consistency_scale = config.train.consistency_scale
 
-    def train_step(params, opt_state, batch, weights, rng_key):
+    def train_step(params, opt_state, batch, weights, rng_key, ema_params):
         # Pre-compute categorical support targets outside loss_fn so they
         # are constants w.r.t. the gradient — zero gradient flows through them.
         value_target_dist = scalar_to_support(
@@ -71,10 +71,11 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 )
                 next_hidden = out.hidden_state
 
-                target_proj = jax.lax.stop_gradient(
-                    model.apply(
-                        {"params": p}, next_hidden, method=model.project_target
-                    )
+                # EMA target: use the slowly-moving average of params rather than
+                # stop_gradient on the same params. EMA params are passed in as a
+                # separate argument so they don't participate in the gradient.
+                target_proj = model.apply(
+                    {"params": ema_params}, next_hidden, method=model.project_target
                 )
 
                 ri_loss = optax.softmax_cross_entropy(out.reward_logits, ri_dist)
@@ -214,11 +215,16 @@ class LearnerActor:
             ckpt_dir,
             options=ocp.CheckpointManagerOptions(max_to_keep=3, create=True),
         )
+        # EMA parameters for the target encoder (BYOL-style consistency loss).
+        # Initialized to match the online params; updated after every training step.
+        self.ema_params = self.params
+
         latest = self.ckpt_manager.latest_step()
         if latest is not None:
             target = {
                 "params": self.params,
                 "opt_state": self.opt_state,
+                "ema_params": self.ema_params,
                 "step": np.array(0),
             }
             restored = self.ckpt_manager.restore(
@@ -226,6 +232,7 @@ class LearnerActor:
             )
             self.params = restored["params"]
             self.opt_state = restored["opt_state"]
+            self.ema_params = restored.get("ema_params", self.params)
             self.train_step_count = int(restored["step"])
             logger.info(
                 f"(Learner pid={os.getpid()}) Restored checkpoint from step {self.train_step_count}."
@@ -264,10 +271,17 @@ class LearnerActor:
 
         t_step = time.monotonic()
         self.params, self.opt_state, metrics, new_priorities = self.train_step(
-            self.params, self.opt_state, jax_batch, jax_weights, train_key
+            self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
         )
         step_ms = (time.monotonic() - t_step) * 1000
         self.train_step_count += 1
+
+        # Update EMA parameters outside the JIT boundary (no recompilation needed).
+        decay = self.config.train.ema_decay
+        self.ema_params = jax.tree_util.tree_map(
+            lambda e, p: decay * e + (1.0 - decay) * p,
+            self.ema_params, self.params,
+        )
 
         self.replay_buffer.update_priorities.remote(indices, np.array(new_priorities))
 
@@ -308,6 +322,7 @@ class LearnerActor:
         state = {
             "params": self.params,
             "opt_state": self.opt_state,
+            "ema_params": self.ema_params,
             "step": np.array(self.train_step_count),
         }
         self.ckpt_manager.save(self.train_step_count, args=ocp.args.StandardSave(state))

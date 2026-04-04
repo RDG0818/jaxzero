@@ -110,9 +110,6 @@ tests/
 - Environment wrapper abstract base class (`envs/base.py`)
 - SMAC/jaxMARL environment wrapper (`envs/smax_env_wrapper.py` is a stub)
 - Unit tests for `utils/` and `train.py`
-- Remove `model.predict()` method and consolidate to `recurrent_inference` only (marked TODO in `model.py`)
-- Add synchronous training loop option for easier debugging (see Future Improvements)
-- Add IPPO and MAPPO baselines for comparison (`baselines/` directory, separate entry points)
 
 ## Environment Wrappers
 
@@ -180,10 +177,6 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 - **[easy] Standalone eval script** — a `eval.py` that loads a checkpoint, runs N episodes with MCTS (no training), and logs mean return. Useful for comparing runs without re-training.
 
-- **[easy] Synchronous training loop** — add `run_training_loop_sync()` in `training/loop.py` that replaces `ray.wait()` with sequential `ray.get()` calls. Controlled by `train.sync: bool` config flag. No changes to actor internals. Tradeoff: ~2-3× slower for MuZero (off-policy async overlap is free throughput), but far simpler to debug. Use for ablations and research iterations.
-
 - **[medium] Reanalyze actors** — add a dedicated `ReanalyzeActor` that re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Standard in MuZero but not yet implemented.
 
-- **[medium] IPPO baseline** — `baselines/ippo.py` + `train_ippo.py`. Pure JAX, no Ray. `jax.lax.scan` over timesteps, `jax.vmap` over parallel envs. Parameter sharing across agents with agent-ID one-hot appended to obs. Team reward. GAE + PPO clip objective. Compare against MuZero to measure MCTS planning benefit.
-
-- **[medium] MAPPO baseline** — `baselines/mappo.py` + `train_mappo.py`. Extends IPPO with a centralized critic that takes global state (concatenated all-agent observations). Decentralized execution, centralized training (CTDE).
+- **[major] Synchronous training loop** — replace the `ray.wait()`-based async loop with a sequential `ray.get()` loop. Simpler to reason about; prerequisite for on-policy MuZero variants. Treat as an architecture change, not a small cleanup.

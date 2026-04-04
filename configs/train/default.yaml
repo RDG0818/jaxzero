@@ -25,5 +25,6 @@ project_name: myzero1
 checkpoint_dir: checkpoints
 checkpoint_interval: 2500
 num_envs_per_actor: 4  # parallel environments per DataActor
+ema_decay: 0.999       # EMA decay for target encoder (BYOL-style consistency loss)
 debug: false
 debug_interval: 100  # emit detailed debug logs every N learner training steps
