@@ -82,12 +82,13 @@ def run_training_loop(
         else:
             ep_return = ray.get(done_ref)
             returns.append(ep_return)
-            episodes_processed += 1
+            episodes_processed += config.train.num_envs_per_actor
 
             finished_actor = actor_tasks.pop(done_ref)
             actor_tasks[finished_actor.run_episode.remote()] = finished_actor
 
-            if episodes_processed % config.train.log_interval == 0 and returns:
+            prev = episodes_processed - config.train.num_envs_per_actor
+            if episodes_processed // config.train.log_interval > prev // config.train.log_interval and returns:
                 avg_return = float(np.mean(returns))
                 avg_loss = float(np.mean(train_losses)) if train_losses else 0.0
                 elapsed = time.monotonic() - interval_start
