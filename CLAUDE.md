@@ -35,6 +35,8 @@ Violating these rules causes silent failures or segfaults that are difficult to 
 
 ```
 train.py                  # entry point (@hydra.main, builds ExperimentConfig, launches Ray actors)
+train_ippo.py             # entry point for IPPO baseline (pure JAX, no Ray)
+train_mappo.py            # entry point for MAPPO baseline (pure JAX, no Ray)
 config.py                 # dataclasses only: ModelConfig, MCTSConfig, TrainConfig, ExperimentConfig
 configs/
   config.yaml             # root defaults (model: default, mcts: default, train: default)
@@ -42,12 +44,19 @@ configs/
   mcts/default.yaml       # MCTS hyperparameters (independent planner)
   mcts/joint.yaml         # joint planner preset (inherits default, sets planner_mode: joint)
   train/default.yaml      # training hyperparameters
+  baseline/
+    ippo.yaml             # IPPO hyperparameters
+    mappo.yaml            # MAPPO hyperparameters
 actors/
   learner_actor.py        # LearnerActor (GPU), make_train_step factory
   data_actor.py           # DataActor (CPU)
   replay_buffer_actor.py  # ReplayBufferActor (wraps ReplayBuffer)
+baselines/
+  networks.py             # ActorCritic + CentralizedCritic Flax modules (shared params)
+  ippo.py                 # IPPO: GAE + PPO clip, decentralized actor + decentralized critic
+  mappo.py                # MAPPO: GAE + PPO clip, decentralized actor + centralized critic
 training/
-  loop.py                 # run_warmup(), run_training_loop()
+  loop.py                 # run_warmup(), run_training_loop(), run_training_loop_sync()
 model/
   model.py                # FlaxMAMuZeroNet and sub-networks
   attention.py            # TransformerAttentionEncoder
@@ -57,7 +66,7 @@ mcts/
   mcts_independent.py     # MCTSIndependentPlanner
   mcts_joint.py           # MCTSJointPlanner
 envs/
-  mpe_env_wrapper.py      # MPEEnvWrapper (JaxMARL MPE)
+  mpe_env_wrapper.py      # MPEEnvWrapper + VecMPEEnvWrapper (JaxMARL MPE)
   smax_env_wrapper.py     # stub for future SMAC wrapper
 utils/
   transforms.py           # DiscreteSupport, scalar_to_support, support_to_scalar
@@ -98,10 +107,12 @@ tests/
 ## Key TODOs in the Codebase
 
 - Reanalyze actors to reduce stale data in the replay buffer
-- Environment wrapper abstract base class
+- Environment wrapper abstract base class (`envs/base.py`)
 - SMAC/jaxMARL environment wrapper (`envs/smax_env_wrapper.py` is a stub)
 - Unit tests for `utils/` and `train.py`
 - Remove `model.predict()` method and consolidate to `recurrent_inference` only (marked TODO in `model.py`)
+- Add synchronous training loop option for easier debugging (see Future Improvements)
+- Add IPPO and MAPPO baselines for comparison (`baselines/` directory, separate entry points)
 
 ## Environment Wrappers
 
@@ -109,6 +120,19 @@ tests/
 - `reset(rng_key) → (observation, state)` where observation shape is `(1, N, obs_dim)`
 - `step(rng_key, state, actions) → (next_obs, next_state, reward, done)`
 - `observation_shape: Tuple[int, ...]`, `observation_size: int`, `action_space_size: int`
+
+The IPPO/MAPPO baselines interact with JaxMARL environments directly (not through `MPEEnvWrapper`) using `jaxmarl.make()` and `jaxmarl.wrappers.baselines.LogWrapper` for episode statistics.
+
+## Baselines
+
+IPPO and MAPPO are on-policy baselines implemented in pure JAX (no Ray). Key design choices:
+- **Parameter sharing**: all agents share one network; agent one-hot ID is appended to obs
+- **Vectorized rollout**: `jax.lax.scan` over T timesteps across B parallel envs simultaneously
+- **No replay buffer**: on-policy — data collected each iteration is used once then discarded
+- **Team reward**: summed reward across all agents (cooperative setting)
+- **MAPPO centralized critic**: global state = concatenation of all agent observations `(B, N*obs_size)`
+
+JaxMARL does **not** ship IPPO/MAPPO implementations — only environment wrappers and utilities. The `CTRolloutManager` in `jaxmarl.wrappers.baselines` provides centralized training utilities but is not used here (we implement rollout collection directly via scan).
 
 ## Future Improvements
 
@@ -156,4 +180,10 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 - **[easy] Standalone eval script** — a `eval.py` that loads a checkpoint, runs N episodes with MCTS (no training), and logs mean return. Useful for comparing runs without re-training.
 
+- **[easy] Synchronous training loop** — add `run_training_loop_sync()` in `training/loop.py` that replaces `ray.wait()` with sequential `ray.get()` calls. Controlled by `train.sync: bool` config flag. No changes to actor internals. Tradeoff: ~2-3× slower for MuZero (off-policy async overlap is free throughput), but far simpler to debug. Use for ablations and research iterations.
+
 - **[medium] Reanalyze actors** — add a dedicated `ReanalyzeActor` that re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Standard in MuZero but not yet implemented.
+
+- **[medium] IPPO baseline** — `baselines/ippo.py` + `train_ippo.py`. Pure JAX, no Ray. `jax.lax.scan` over timesteps, `jax.vmap` over parallel envs. Parameter sharing across agents with agent-ID one-hot appended to obs. Team reward. GAE + PPO clip objective. Compare against MuZero to measure MCTS planning benefit.
+
+- **[medium] MAPPO baseline** — `baselines/mappo.py` + `train_mappo.py`. Extends IPPO with a centralized critic that takes global state (concatenated all-agent observations). Decentralized execution, centralized training (CTDE).
