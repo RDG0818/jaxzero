@@ -104,7 +104,7 @@ def run_training_loop(
 
                 if config.train.debug:
                     buf_stats = ray.get(replay_buffer.get_stats.remote())
-                    logger.debug(f"  {_fmt_buf_stats(buf_stats)}")
+                    logger.info(f"  {_fmt_buf_stats(buf_stats)}")
 
                 if config.train.wandb_mode != "disabled":
                     wandb.log(

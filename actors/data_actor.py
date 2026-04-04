@@ -38,10 +38,6 @@ class DataActor:
         from mcts import MCTSIndependentPlanner, MCTSJointPlanner
         from envs import MPEEnvWrapper
 
-        if config.train.debug:
-            from utils.logging_utils import enable_debug
-            enable_debug()
-
         self.actor_id = actor_id
         self.config = config
         self.learner = learner_actor
@@ -135,7 +131,7 @@ class DataActor:
             all_targets = np.stack([t.policy_target for t in episode.trajectory])  # (T, N, A)
             p = np.clip(all_targets, 1e-8, None)
             policy_entropy = float(-np.sum(p * np.log(p), axis=-1).mean())
-            logger.debug(
+            logger.info(
                 f"(DataActor {self.actor_id}) "
                 f"ep_len={ep_len} return={episode.episode_return:.3f} "
                 f"mean_root_value={mean_root_value:.3f} "
@@ -159,6 +155,6 @@ class DataActor:
         if self.episodes_since_update >= self.config.train.param_update_interval:
             self.params = ray.get(self.learner.get_params.remote())
             self.episodes_since_update = 0
-            logger.debug(f"(DataActor {self.actor_id}) Synced params from learner.")
+            logger.info(f"(DataActor {self.actor_id}) Synced params from learner.")
 
         return episode.episode_return

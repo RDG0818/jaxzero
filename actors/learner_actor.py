@@ -168,10 +168,6 @@ class LearnerActor:
         from utils.transforms import DiscreteSupport
         from model import FlaxMAMuZeroNet
 
-        if config.train.debug:
-            from utils.logging_utils import enable_debug
-            enable_debug()
-
         self.config = config
         logger.info(f"(Learner pid={os.getpid()}) Initializing on GPU...")
 
@@ -254,7 +250,7 @@ class LearnerActor:
             return None
 
         if debug and self.train_step_count % debug_interval == 0:
-            logger.debug(
+            logger.info(
                 f"(Learner) step={self.train_step_count} | "
                 f"batch obs shape={batch.observation.shape} | "
                 f"value_target [{batch.value_target.min():.3f}, {batch.value_target.max():.3f}] "
@@ -294,7 +290,7 @@ class LearnerActor:
             )
 
         if debug and self.train_step_count % debug_interval == 0:
-            logger.debug(
+            logger.info(
                 f"(Learner) step={self.train_step_count} | "
                 f"total={total_loss:.4f} "
                 f"reward={metrics['reward_loss']:.4f} "
