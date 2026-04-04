@@ -9,3 +9,4 @@ pytest
 loguru
 orbax-checkpoint
 hydra-core
+flashbax
