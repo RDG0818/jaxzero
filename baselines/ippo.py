@@ -221,15 +221,45 @@ def make_train(config):
             metric = traj_batch.info
             rng = update_state[-1]
 
-            if config.get("WANDB_MODE", "disabled") != "disabled":
-                import wandb
-                loss_mean = jax.tree.map(lambda x: x.mean(), loss_info)
-                metric_mean = jax.tree.map(lambda x: x.mean(), metric)
+            loss_mean = jax.tree.map(lambda x: x.mean(), loss_info)
+            num_updates = config["NUM_UPDATES"]
 
-                def callback(m):
-                    wandb.log(m)
+            def _log_callback(update_steps, ret, total_loss, actor_loss, critic_loss, entropy):
+                step = int(update_steps)
+                env_step = step * config["NUM_ENVS"] * config["NUM_STEPS"]
+                print(
+                    f"IPPO update {step}/{num_updates} | "
+                    f"env_steps={env_step:,} | "
+                    f"return={float(ret):.3f} | "
+                    f"total_loss={float(total_loss):.4f} | "
+                    f"actor_loss={float(actor_loss):.4f} | "
+                    f"critic_loss={float(critic_loss):.4f} | "
+                    f"entropy={float(entropy):.4f}",
+                    flush=True,
+                )
+                if config.get("WANDB_MODE", "disabled") != "disabled":
+                    import wandb
+                    wandb.log({
+                        "returns": float(ret),
+                        "env_step": env_step,
+                        "total_loss": float(total_loss),
+                        "actor_loss": float(actor_loss),
+                        "critic_loss": float(critic_loss),
+                        "entropy": float(entropy),
+                    })
 
-                jax.experimental.io_callback(callback, None, {**metric_mean, **{"total_loss": loss_mean[0]}})
+            # track update count via runner_state length (scan index not directly available)
+            # use returned_episode_returns mean as the return signal
+            ret = metric["returned_episode_returns"].mean()
+            jax.experimental.io_callback(
+                _log_callback, None,
+                update_state[0].step // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"]),
+                ret,
+                loss_mean[0],        # total_loss
+                loss_mean[1][1],     # actor_loss
+                loss_mean[1][0],     # critic_loss
+                loss_mean[1][2],     # entropy
+            )
 
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric

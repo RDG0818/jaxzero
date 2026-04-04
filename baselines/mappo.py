@@ -400,19 +400,31 @@ def make_train(config):
             metric["loss"] = loss_info
             rng = update_state[-1]
 
-            if config.get("WANDB_MODE", "disabled") != "disabled":
-                import wandb
+            metric["update_steps"] = update_steps
 
-                def callback(metric):
+            def _log_callback(metric):
+                step = int(metric["update_steps"])
+                env_step = step * config["NUM_ENVS"] * config["NUM_STEPS"]
+                ret = float(metric["returned_episode_returns"][-1, :].mean())
+                loss = metric["loss"]
+                print(
+                    f"MAPPO update {step}/{config['NUM_UPDATES']} | "
+                    f"env_steps={env_step:,} | "
+                    f"return={ret:.3f} | "
+                    f"actor_loss={float(loss['actor_loss']):.4f} | "
+                    f"value_loss={float(loss['value_loss']):.4f} | "
+                    f"entropy={float(loss['entropy']):.4f}",
+                    flush=True,
+                )
+                if config.get("WANDB_MODE", "disabled") != "disabled":
+                    import wandb
                     wandb.log({
-                        "returns": metric["returned_episode_returns"][-1, :].mean(),
-                        "env_step": metric["update_steps"] * config["NUM_ENVS"] * config["NUM_STEPS"],
-                        **metric["loss"],
+                        "returns": ret,
+                        "env_step": env_step,
+                        **loss,
                     })
 
-                metric["update_steps"] = update_steps
-                jax.experimental.io_callback(callback, None, metric)
-
+            jax.experimental.io_callback(_log_callback, None, metric)
             update_steps = update_steps + 1
             runner_state = (train_states, env_state, last_obs, last_done, hstates, rng)
             return (runner_state, update_steps), metric
