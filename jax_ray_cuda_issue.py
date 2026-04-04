@@ -110,13 +110,20 @@ import ray
 @ray.remote(num_cpus=1)
 class BrokenCpuActor:
     """
-    Demonstrates the crash.
+    Demonstrates both failure modes.
 
-    Ray sets CUDA_VISIBLE_DEVICES="" for this worker. Importing JAX triggers
-    the CUDA plugin's cuInit(0) call, which fails with CUDA_ERROR_NO_DEVICE.
+    1. Explicitly sets CUDA_VISIBLE_DEVICES="" (simulating Ray's legacy
+       behavior for zero-GPU workers) THEN imports JAX — triggers the
+       cuInit(0) crash.
+
+    2. If RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 suppresses Ray's override,
+       the actor gets the GPU and uses it silently — wrong but not a crash.
+       This is a secondary bug: CPU workers should never default to GPU.
     """
     def __init__(self):
-        import jax  # <-- crashes here if CUDA_VISIBLE_DEVICES="" and GPU present
+        # Simulate what Ray used to do (and still does without the opt-out flag).
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        import jax  # <-- crashes here: cuInit(0) -> CUDA_ERROR_NO_DEVICE
         self.devices = str(jax.devices())
 
     def get_devices(self):
@@ -183,9 +190,9 @@ def initialize():
 # ---------------------------------------------------------------------------
 
 def main():
-    # Opt into Ray's forthcoming default (no CUDA_VISIBLE_DEVICES override for
-    # zero-GPU workers). Set before ray.init().
-    os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
+    # Do NOT set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO here so that BrokenCpuActor
+    # demonstrates the crash under Ray's current default behavior. The fixed
+    # actor applies the workaround itself and doesn't rely on Ray's settings.
     ray.init(ignore_reinit_error=True)
 
     print("=" * 60)
