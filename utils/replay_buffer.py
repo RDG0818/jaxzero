@@ -78,6 +78,107 @@ tree_util.register_pytree_node(
 )
 
 
+class ReplayBuffer:
+    """
+    Prioritized experience replay backed by pre-allocated NumPy arrays.
+
+    All data lives in fixed-size arrays — no copies on add, O(1) priority
+    updates, and O(n) weighted sampling (fast for n <= 100k with numpy).
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        observation_shape: Tuple,
+        action_space_size: int,
+        num_agents: int,
+        unroll_steps: int,
+        alpha: float,
+        beta_start: float,
+        beta_frames: int,
+    ):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.beta_start = beta_start
+        self.beta_frames = beta_frames
+        self.frame_count = 0
+
+        self.observations    = np.zeros((capacity, num_agents, *observation_shape), dtype=np.float32)
+        self.actions         = np.zeros((capacity, unroll_steps, num_agents),       dtype=np.int32)
+        self.policy_targets  = np.zeros((capacity, unroll_steps + 1, num_agents, action_space_size), dtype=np.float32)
+        self.value_targets   = np.zeros((capacity, unroll_steps + 1, num_agents),   dtype=np.float32)
+        self.reward_targets  = np.zeros((capacity, unroll_steps, num_agents),        dtype=np.float32)
+        self.agent_orders    = np.zeros((capacity, num_agents),                      dtype=np.int32)
+        self.priorities      = np.zeros(capacity,                                    dtype=np.float32)
+
+        self.pointer = 0
+        self.size    = 0
+
+    def add(self, item: ReplayItem, priority: float):
+        """Adds a ReplayItem, overwriting the oldest entry when full."""
+        idx = self.pointer
+        self.observations[idx]   = item.observation
+        self.actions[idx]        = item.actions
+        self.policy_targets[idx] = item.policy_target
+        self.value_targets[idx]  = item.value_target
+        self.reward_targets[idx] = item.reward_target
+        self.agent_orders[idx]   = item.agent_order
+        self.priorities[idx]     = priority if priority > 0 else self.priorities[:self.size].max() if self.size > 0 else 1.0
+
+        self.pointer = (self.pointer + 1) % self.capacity
+        self.size    = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size: int) -> Tuple[ReplayItem, np.ndarray, np.ndarray]:
+        """
+        Samples a batch with prioritized experience replay.
+        Returns (batch, importance_weights, indices) or (None, None, None).
+        """
+        if self.size == 0:
+            return None, None, None
+
+        probs  = self.priorities[:self.size] ** self.alpha
+        probs /= probs.sum()
+
+        indices = np.random.choice(self.size, batch_size, p=probs)
+        beta    = min(1.0, self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames)
+        self.frame_count += 1
+
+        weights  = (self.size * probs[indices]) ** (-beta)
+        weights /= weights.max()
+
+        batch = ReplayItem(
+            observation   = self.observations[indices],
+            actions       = self.actions[indices],
+            policy_target = self.policy_targets[indices],
+            value_target  = self.value_targets[indices],
+            reward_target = self.reward_targets[indices],
+            agent_order   = self.agent_orders[indices],
+        )
+        return batch, weights, indices
+
+    def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
+        self.priorities[indices] = priorities
+
+    def get_stats(self) -> dict:
+        if self.size == 0:
+            return {"size": 0, "capacity": self.capacity, "fill_pct": 0.0}
+        active = self.priorities[:self.size]
+        beta   = min(1.0, self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames)
+        return {
+            "size":          self.size,
+            "capacity":      self.capacity,
+            "fill_pct":      100.0 * self.size / self.capacity,
+            "priority_min":  float(active.min()),
+            "priority_max":  float(active.max()),
+            "priority_mean": float(active.mean()),
+            "priority_std":  float(active.std()),
+            "beta":          beta,
+        }
+
+    def __len__(self):
+        return self.size
+
+
 # ---------------------------------------------------------------------------
 # Episode processing
 # ---------------------------------------------------------------------------
