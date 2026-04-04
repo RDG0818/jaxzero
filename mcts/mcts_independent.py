@@ -108,7 +108,7 @@ class MCTSIndependentPlanner(MCTSPlanner):
             key, agent = inputs
             # Add exploration noise to this agent's root prior.
             mcts_key, noisy_logits = self.add_dirichlet_noise(key, root_logits[:, agent, :])
-            embedding = (root_latent, jnp.array([agent], jnp.int32))
+            embedding = (root_latent, jnp.full((root_latent.shape[0],), agent, dtype=jnp.int32))
 
             out = mctx.gumbel_muzero_policy(
                 params=params,
