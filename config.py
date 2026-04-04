@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Tuple
 
-# TODO: Clean up configs entries
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -25,7 +24,8 @@ class ModelConfig:
     pred_hid: int = 64
     pred_out: int = 256
 
-@dataclass
+
+@dataclass(frozen=True)
 class MCTSConfig:
     """Hyperparameters for the MCTS planner."""
     planner_mode: str = "independent"  # "independent" or "joint"
@@ -36,7 +36,8 @@ class MCTSConfig:
     dirichlet_fraction: float = 0.25
     independent_argmax: bool = True
 
-@dataclass
+
+@dataclass(frozen=True)
 class TrainConfig:
     """Hyperparameters for the training process."""
     env_name: str = "MPE_simple_spread_v3"
@@ -59,16 +60,19 @@ class TrainConfig:
     consistency_scale: float = 1.0
     gradient_clip_norm: float = 5.0
     unroll_steps: int = 5
-    n_step : int = 10
+    n_step: int = 10
     discount_gamma: float = 0.99
-    wandb_mode: str = "disabled" # online or disabled
+    wandb_mode: str = "disabled"  # "online" or "disabled"
     project_name: str = "myzero1"
+    checkpoint_dir: str = "checkpoints"
+    checkpoint_interval: int = 1000
+    debug: bool = False
+    debug_interval: int = 100  # emit detailed debug logs every N learner training steps
 
-@dataclass
+
+@dataclass(frozen=True)
 class ExperimentConfig:
-    """Root configuration that composes all other configs."""
+    """Root configuration that composes all sub-configs."""
     train: TrainConfig = field(default_factory=TrainConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     mcts: MCTSConfig = field(default_factory=MCTSConfig)
-
-CONFIG = ExperimentConfig()

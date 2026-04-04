@@ -1,0 +1,9 @@
+defaults:
+  - model: default
+  - mcts: default
+  - train: default
+  - _self_
+
+hydra:
+  job:
+    chdir: false

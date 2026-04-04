@@ -1,0 +1,16 @@
+hidden_state_size: 128
+value_support_size: 300
+reward_support_size: 300
+fc_representation_layers: [128]
+fc_dynamic_layers: [128]
+fc_reward_layers: [32]
+fc_value_layers: [32]
+fc_policy_layers: [32]
+attention_type: transformer  # "transformer" or "none"
+attention_layers: 1
+attention_heads: 1
+dropout_rate: 0.1
+proj_hid: 256
+proj_out: 256
+pred_hid: 64
+pred_out: 256

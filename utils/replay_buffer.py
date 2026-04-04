@@ -177,6 +177,22 @@ class ReplayBuffer:
         """Updates priorities for previously sampled indices."""
         self.priorities[indices] = priorities
 
+    def get_stats(self) -> dict:
+        """Returns a snapshot of buffer health for debug logging."""
+        if self.size == 0:
+            return {"size": 0, "capacity": self.capacity, "fill_pct": 0.0}
+        active = self.priorities[:self.size]
+        return {
+            "size": self.size,
+            "capacity": self.capacity,
+            "fill_pct": 100.0 * self.size / self.capacity,
+            "priority_min": float(active.min()),
+            "priority_max": float(active.max()),
+            "priority_mean": float(active.mean()),
+            "priority_std": float(active.std()),
+            "beta": float(self._get_beta()),
+        }
+
     def __len__(self):
         return self.size
 

@@ -7,3 +7,5 @@ ray
 wandb
 pytest
 loguru
+orbax-checkpoint
+hydra-core

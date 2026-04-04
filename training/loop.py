@@ -4,17 +4,25 @@ from collections import deque
 
 import ray
 
-from config import CONFIG
+from config import ExperimentConfig
 from utils.logging_utils import logger
 
 
-def run_warmup(data_actors: list, replay_buffer) -> dict:
+def _fmt_buf_stats(stats: dict) -> str:
+    return (
+        f"buf={stats['size']}/{stats['capacity']} ({stats['fill_pct']:.1f}%) "
+        f"pri=[{stats['priority_min']:.3f},{stats['priority_max']:.3f}] "
+        f"beta={stats['beta']:.3f}"
+    )
+
+
+def run_warmup(data_actors: list, replay_buffer, config: ExperimentConfig) -> dict:
     """
     Fills the replay buffer to `warmup_episodes` items before training begins.
     Returns the {future: actor} dict so the training loop can pick up where
     warmup left off without restarting all actors.
     """
-    target = CONFIG.train.warmup_episodes
+    target = config.train.warmup_episodes
     logger.info(f"Warmup: filling buffer to {target} items...")
     start = time.time()
 
@@ -35,7 +43,9 @@ def run_warmup(data_actors: list, replay_buffer) -> dict:
     return actor_tasks
 
 
-def run_training_loop(learner, data_actors: list, replay_buffer, actor_tasks: dict):
+def run_training_loop(
+    learner, data_actors: list, replay_buffer, actor_tasks: dict, config: ExperimentConfig,
+):
     """
     Main training loop.
 
@@ -43,18 +53,19 @@ def run_training_loop(learner, data_actors: list, replay_buffer, actor_tasks: di
     whichever task finishes first so neither blocks the other. The learner
     fires a new training step immediately after each step completes.
     """
-    if CONFIG.train.wandb_mode != "disabled":
+    if config.train.wandb_mode != "disabled":
         import wandb
 
     episodes_processed = 0
-    returns: deque = deque(maxlen=CONFIG.train.log_interval)
-    train_losses: deque = deque(maxlen=CONFIG.train.log_interval)
-    start_time = time.time()
+    train_steps = 0
+    returns: deque = deque(maxlen=config.train.log_interval)
+    train_losses: deque = deque(maxlen=config.train.log_interval)
+    interval_start = time.monotonic()
 
     learner_task = learner.train.remote()
     logger.info("Starting main training loop...")
 
-    while episodes_processed < CONFIG.train.num_episodes:
+    while episodes_processed < config.train.num_episodes:
         all_pending = list(actor_tasks.keys()) + [learner_task]
         done_refs, _ = ray.wait(all_pending, num_returns=1)
         done_ref = done_refs[0]
@@ -63,7 +74,8 @@ def run_training_loop(learner, data_actors: list, replay_buffer, actor_tasks: di
             metrics = ray.get(learner_task)
             if metrics is not None:
                 train_losses.append(metrics["total_loss"])
-                if CONFIG.train.wandb_mode != "disabled":
+                train_steps += 1
+                if config.train.wandb_mode != "disabled":
                     wandb.log(metrics, step=episodes_processed)
             learner_task = learner.train.remote()
 
@@ -75,25 +87,38 @@ def run_training_loop(learner, data_actors: list, replay_buffer, actor_tasks: di
             finished_actor = actor_tasks.pop(done_ref)
             actor_tasks[finished_actor.run_episode.remote()] = finished_actor
 
-            if episodes_processed % CONFIG.train.log_interval == 0 and returns:
+            if episodes_processed % config.train.log_interval == 0 and returns:
                 avg_return = float(np.mean(returns))
                 avg_loss = float(np.mean(train_losses)) if train_losses else 0.0
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - interval_start
+                eps_per_sec = config.train.log_interval / elapsed
+                steps_per_sec = train_steps / elapsed
+
                 logger.info(
                     f"Episodes: {episodes_processed:6d} | "
                     f"Avg Return: {avg_return:8.2f} | "
                     f"Avg Loss: {avg_loss:.4f} | "
-                    f"Elapsed: {elapsed:.1f}s"
+                    f"eps/s: {eps_per_sec:.1f} | "
+                    f"train steps/s: {steps_per_sec:.1f}"
                 )
-                if CONFIG.train.wandb_mode != "disabled":
+
+                if config.train.debug:
+                    buf_stats = ray.get(replay_buffer.get_stats.remote())
+                    logger.debug(f"  {_fmt_buf_stats(buf_stats)}")
+
+                if config.train.wandb_mode != "disabled":
                     wandb.log(
                         {
                             "avg_return": avg_return,
                             "avg_loss": avg_loss,
                             "episodes": episodes_processed,
+                            "eps_per_sec": eps_per_sec,
+                            "train_steps_per_sec": steps_per_sec,
                         },
                         step=episodes_processed,
                     )
-                start_time = time.time()
+
+                train_steps = 0
+                interval_start = time.monotonic()
 
     logger.info("Training complete.")

@@ -8,16 +8,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 # Setup
 conda create -n mazero python=3.10.18 && conda activate mazero
 pip install -r requirements.txt
-wandb login  # set wandb_mode to "online" in config.py to enable
+wandb login  # set wandb_mode to "online" in configs/train/default.yaml to enable
 
 # Run training
-python train.py
+python train.py                                  # default config
+python train.py mcts=joint                       # switch to joint planner
+python train.py train.num_episodes=50000         # override single value
+python train.py train.batch_size=128 mcts.num_simulations=50
 
 # Run tests
 pytest tests/ -v
 ```
 
-To change environment, planner mode, or hyperparameters, edit `config.py` directly — there is no CLI argument parsing.
+Hyperparameters live in `configs/`. Edit the relevant YAML or pass overrides on the CLI — no code changes needed.
 
 ## Critical JAX + Ray Constraint
 
@@ -31,8 +34,14 @@ Violating these rules causes silent failures or segfaults that are difficult to 
 ## Package Layout
 
 ```
-train.py                  # entry point
-config.py                 # single CONFIG singleton (ModelConfig, MCTSConfig, TrainConfig)
+train.py                  # entry point (@hydra.main, builds ExperimentConfig, launches Ray actors)
+config.py                 # dataclasses only: ModelConfig, MCTSConfig, TrainConfig, ExperimentConfig
+configs/
+  config.yaml             # root defaults (model: default, mcts: default, train: default)
+  model/default.yaml      # model architecture hyperparameters
+  mcts/default.yaml       # MCTS hyperparameters (independent planner)
+  mcts/joint.yaml         # joint planner preset (inherits default, sets planner_mode: joint)
+  train/default.yaml      # training hyperparameters
 actors/
   learner_actor.py        # LearnerActor (GPU), make_train_step factory
   data_actor.py           # DataActor (CPU)
@@ -84,11 +93,10 @@ tests/
 
 **Data flow**: `observation (B,N,obs_dim)` → representation → latent `(B,N,D)` → MCTS (calls `recurrent_inference` inside simulations) → `MCTSPlanOutput` → `Transition` → `Episode` → `process_episode` (n-step returns) → `ReplayItem` → `ReplayBuffer`.
 
-**Config** (`config.py`): Single frozen `CONFIG` instance imported everywhere. Three nested dataclasses: `ModelConfig`, `MCTSConfig`, `TrainConfig`.
+**Config** (`config.py` + `configs/`): Hydra composes YAML files into a `DictConfig`, which `_build_config()` in `train.py` converts to typed dataclasses (`ModelConfig`, `MCTSConfig`, `TrainConfig`, `ExperimentConfig`). The dataclass instance is passed explicitly to every Ray actor constructor — there is no global singleton. All three sub-configs are `frozen=True`.
 
 ## Key TODOs in the Codebase
 
-- Model saving/loading (orbax-checkpoint is in requirements but unused)
 - Reanalyze actors to reduce stale data in the replay buffer
 - Environment wrapper abstract base class
 - SMAC/jaxMARL environment wrapper (`envs/smax_env_wrapper.py` is a stub)
@@ -145,10 +153,6 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 - **[research] Count-based / intrinsic exploration** — add an exploration bonus to the MCTS root value based on visitation counts or a learned density model. Helps in sparse-reward cooperative tasks where the agents need to discover coordinated behaviors.
 
 ### Training / Infrastructure
-
-- **[easy] Hydra config** — replace the single `ExperimentConfig` dataclass with Hydra for composable YAML configs and CLI overrides. Minimal code change; large usability improvement for sweeps.
-
-- **[easy] Checkpointing** — orbax-checkpoint is already in requirements. Add periodic `checkpointer.save(step, {'params': params})` in `LearnerActor` and a restore path at startup.
 
 - **[easy] Standalone eval script** — a `eval.py` that loads a checkpoint, runs N episodes with MCTS (no training), and logs mean return. Useful for comparing runs without re-training.
 

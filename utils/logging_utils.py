@@ -1,9 +1,5 @@
-# In utils/logging_utils.py
-
 import sys
 from loguru import logger
-
-DEBUG_MODE = True 
 
 logger.level("INFO", color="<white>")
 logger.level("DEBUG", color="<cyan>")
@@ -13,22 +9,16 @@ logger.level("CRITICAL", color="<white><bg red>")
 
 logger.remove()
 
-log_format = (
+_LOG_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-    "<level>{level}</level> | "
+    "<level>{level: <8}</level> | "
     "<level>{message}</level>"
 )
 
-logger.add(
-    sys.stderr,
-    level="INFO",
-    format=log_format,
-    colorize=True
-)
+logger.add(sys.stderr, level="INFO", format=_LOG_FORMAT, colorize=True)
 
-if __name__ == "__main__":
-    logger.debug("This is a debug message.")
-    logger.info("This is an info message.")
-    logger.warning("This is a warning message.")
-    logger.error("This is an error message.")
-    logger.critical("This is a critical message.")
+
+def enable_debug():
+    """Switch the logger to DEBUG level for the current process."""
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG", format=_LOG_FORMAT, colorize=True)
