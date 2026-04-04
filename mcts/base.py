@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 import chex
 
-from model.model import FlaxMAMuZeroNet
+from model import FlaxMAMuZeroNet
 from config import ExperimentConfig
-from utils.utils import DiscreteSupport
+from utils.transforms import DiscreteSupport
 
 
 class MCTSPlanOutput(NamedTuple):

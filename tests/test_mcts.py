@@ -2,7 +2,7 @@
 Unit tests for mcts/mcts_independent.py and mcts/mcts_joint.py.
 
 Run with:
-    conda run -n mazero pytest unit_tests/test_mcts.py -v
+    conda run -n mazero pytest tests/test_mcts.py -v
 
 Tests are split into:
   - Shared output contract tests (shapes, validity, determinism) for both planners.
@@ -19,10 +19,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from config import ExperimentConfig, ModelConfig, MCTSConfig, TrainConfig
-from model.model import FlaxMAMuZeroNet
-from mcts.base import MCTSPlanOutput
-from mcts.mcts_independent import MCTSIndependentPlanner
-from mcts.mcts_joint import MCTSJointPlanner
+from model import FlaxMAMuZeroNet
+from mcts import MCTSPlanOutput, MCTSIndependentPlanner, MCTSJointPlanner
 
 # ─── Test constants ────────────────────────────────────────────────────────────
 

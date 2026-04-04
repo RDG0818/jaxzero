@@ -32,10 +32,9 @@ class DataActor:
         os.environ["JAX_PLATFORMS"] = "cpu"
 
         import jax
-        from model.model import FlaxMAMuZeroNet
-        from mcts.mcts_independent import MCTSIndependentPlanner
-        from mcts.mcts_joint import MCTSJointPlanner
-        from utils.mpe_env_wrapper import MPEEnvWrapper
+        from model import FlaxMAMuZeroNet
+        from mcts import MCTSIndependentPlanner, MCTSJointPlanner
+        from envs import MPEEnvWrapper
 
         self.actor_id = actor_id
         self.learner = learner_actor

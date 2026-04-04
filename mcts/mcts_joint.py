@@ -7,8 +7,8 @@ import jax.numpy as jnp
 import chex
 import mctx
 
-from model.model import FlaxMAMuZeroNet
-import utils.utils as utils
+from model import FlaxMAMuZeroNet
+import utils.transforms as utils
 from config import ExperimentConfig
 from mcts.base import MCTSPlanner, MCTSPlanOutput
 

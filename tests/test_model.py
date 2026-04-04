@@ -2,7 +2,7 @@
 Unit tests for model/layers.py, model/attention.py, and model/model.py.
 
 Run with:
-    conda run -n mazero pytest unit_tests/test_model.py -v
+    conda run -n mazero pytest tests/test_model.py -v
 """
 
 import pytest
@@ -17,13 +17,12 @@ from model.attention import (
     TransformerEncoderLayer,
     TransformerAttentionEncoder,
 )
+from model import FlaxMAMuZeroNet, MuZeroOutput
 from model.model import (
     RepresentationNetwork,
     DynamicsNetwork,
     PredictionNetwork,
     ProjectionNetwork,
-    FlaxMAMuZeroNet,
-    MuZeroOutput,
 )
 from config import ModelConfig
 

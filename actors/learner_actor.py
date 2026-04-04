@@ -20,7 +20,7 @@ def make_train_step(model, optimizer, value_support, reward_support):
     import jax
     import jax.numpy as jnp
     import optax
-    from utils.utils import scalar_to_support, support_to_scalar
+    from utils.transforms import scalar_to_support, support_to_scalar
 
     U = CONFIG.train.unroll_steps
     value_scale = CONFIG.train.value_scale
@@ -162,8 +162,8 @@ class LearnerActor:
         import jax
         import jax.numpy as jnp
         import optax
-        from utils.utils import DiscreteSupport
-        from model.model import FlaxMAMuZeroNet
+        from utils.transforms import DiscreteSupport
+        from model import FlaxMAMuZeroNet
 
         logger.info(f"(Learner pid={os.getpid()}) Initializing on GPU...")
 
