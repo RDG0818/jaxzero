@@ -3,24 +3,43 @@ IPPO baseline training entry point.
 
 Usage:
   python train_ippo.py
-  python train_ippo.py num_envs=64 total_timesteps=5000000
-  python train_ippo.py env_name=MPE_simple_tag_v3 num_agents=4
+  python train_ippo.py NUM_ENVS=32 TOTAL_TIMESTEPS=5000000
+  python train_ippo.py ENV_NAME=MPE_simple_tag_v3 NUM_SEEDS=3
 """
 
+import jax
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
-from baselines.ippo import IPPOConfig, run_training_loop
+from baselines.ippo import make_train
 
 
 @hydra.main(version_base=None, config_path="configs/baseline", config_name="ippo")
-def main(cfg: DictConfig):
-    raw = OmegaConf.to_container(cfg, resolve=True)
-    # hidden_sizes comes in as a list from YAML; convert to tuple for dataclass
-    if "hidden_sizes" in raw:
-        raw["hidden_sizes"] = tuple(raw["hidden_sizes"])
-    config = IPPOConfig(**raw)
-    run_training_loop(config)
+def main(config):
+    config = OmegaConf.to_container(config, resolve=True)
+
+    if config.get("WANDB_MODE", "disabled") != "disabled":
+        import wandb
+        wandb.init(
+            entity=config.get("ENTITY"),
+            project=config["PROJECT"],
+            tags=["IPPO", "FF"],
+            config=config,
+            mode=config["WANDB_MODE"],
+        )
+
+    rng = jax.random.PRNGKey(config["SEED"])
+    rngs = jax.random.split(rng, config["NUM_SEEDS"])
+    train_jit = jax.jit(make_train(config))
+    out = jax.vmap(train_jit)(rngs)
+
+    # Print final mean return across seeds
+    returns = out["metrics"]["returned_episode_returns"]
+    print(f"Final mean return: {returns.mean(axis=0)[-1]:.3f}")
+
+    if config.get("WANDB_MODE", "disabled") != "disabled":
+        import wandb
+        wandb.finish()
 
 
 if __name__ == "__main__":
