@@ -1,5 +1,5 @@
 planner_mode: independent  # "independent" or "joint"
-num_simulations: 100
+num_simulations: 50
 max_depth_gumbel_search: 10
 num_gumbel_samples: 10
 dirichlet_alpha: 0.3

@@ -8,8 +8,8 @@ from typing import Tuple
 class ModelConfig:
     """Hyperparameters for the MuZero model architecture."""
     hidden_state_size: int = 128
-    value_support_size: int = 300
-    reward_support_size: int = 300
+    value_support_size: int = 20
+    reward_support_size: int = 5
     fc_representation_layers: Tuple[int, ...] = (128,)
     fc_dynamic_layers: Tuple[int, ...] = (128,)
     fc_reward_layers: Tuple[int, ...] = (32,)
@@ -29,7 +29,7 @@ class ModelConfig:
 class MCTSConfig:
     """Hyperparameters for the MCTS planner."""
     planner_mode: str = "independent"  # "independent" or "joint"
-    num_simulations: int = 100
+    num_simulations: int = 50
     max_depth_gumbel_search: int = 10
     num_gumbel_samples: int = 10
     dirichlet_alpha: float = 0.3
