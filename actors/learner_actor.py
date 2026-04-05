@@ -285,7 +285,10 @@ class LearnerActor:
             self.params, self.opt_state, metrics, new_priorities = self.train_step(
                 self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
             )
-            jax.block_until_ready(self.params)
+            # Block on all outputs so priority_copy and metrics_convert don't
+            # pay the wait cost — they're separate XLA outputs that may otherwise
+            # still be in flight when we try to transfer them.
+            jax.block_until_ready((self.params, metrics, new_priorities))
         self.train_step_count += 1
 
         with self.profiler.time("ema_update"):
