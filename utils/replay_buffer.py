@@ -156,6 +156,25 @@ class ReplayBuffer:
         )
         return batch, weights, indices
 
+    def sample_for_reanalysis(self, batch_size: int):
+        """Uniformly samples indices and returns observations for MCTS re-planning.
+        Returns (None, None, None) if buffer is empty."""
+        if self.size == 0:
+            return None, None, None
+        indices = np.random.choice(self.size, min(batch_size, self.size), replace=False)
+        return indices, self.observations[indices].copy(), self.agent_orders[indices].copy()
+
+    def update_targets(self, indices: np.ndarray, policy_targets: np.ndarray, root_values: np.ndarray):
+        """Updates policy and value targets at unroll position 0 for the given indices.
+
+        Args:
+            indices:        Buffer indices to update.
+            policy_targets: (B, N, A) — new MCTS-improved policy at root.
+            root_values:    (B,)     — new scalar root value estimate.
+        """
+        self.policy_targets[indices, 0] = policy_targets
+        self.value_targets[indices, 0] = root_values[:, None]  # broadcast (B,) → (B, N)
+
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         self.priorities[indices] = priorities
 

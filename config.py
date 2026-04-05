@@ -69,6 +69,8 @@ class TrainConfig:
     num_envs_per_actor: int = 4  # number of parallel environments per DataActor
     sync: bool = False           # use synchronous training loop (simpler but ~2-3x slower)
     ema_decay: float = 0.999     # EMA decay for target encoder (BYOL-style consistency loss)
+    num_reanalyze_actors: int = 1
+    reanalyze_batch_size: int = 256
     debug: bool = False
     debug_interval: int = 100  # emit detailed debug logs every N learner training steps
 

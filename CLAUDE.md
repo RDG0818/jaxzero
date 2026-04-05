@@ -16,6 +16,11 @@ python train.py mcts=joint                       # switch to joint planner
 python train.py train.num_episodes=50000         # override single value
 python train.py train.batch_size=128 mcts.num_simulations=50
 
+# Evaluate a checkpoint
+python eval.py                                   # latest checkpoint, default config
+python eval.py eval_episodes=200                 # more episodes
+python eval.py train.checkpoint_dir=checkpoints  # explicit checkpoint dir
+
 # Run tests
 pytest tests/ -v
 ```
@@ -35,6 +40,7 @@ Violating these rules causes silent failures or segfaults that are difficult to 
 
 ```
 train.py                  # entry point (@hydra.main, builds ExperimentConfig, launches Ray actors)
+eval.py                   # standalone eval: loads checkpoint, runs N MCTS episodes, logs return
 train_ippo.py             # entry point for IPPO baseline (pure JAX, no Ray)
 train_mappo.py            # entry point for MAPPO baseline (pure JAX, no Ray)
 config.py                 # dataclasses only: ModelConfig, MCTSConfig, TrainConfig, ExperimentConfig
@@ -50,6 +56,7 @@ configs/
 actors/
   learner_actor.py        # LearnerActor (GPU), make_train_step factory
   data_actor.py           # DataActor (CPU)
+  reanalyze_actor.py      # ReanalyzeActor (CPU): re-runs MCTS with latest params to freshen targets
   replay_buffer_actor.py  # ReplayBufferActor (wraps ReplayBuffer)
 baselines/
   networks.py             # ActorCritic + CentralizedCritic Flax modules (shared params)
@@ -69,7 +76,7 @@ envs/
   mpe_env_wrapper.py      # MPEEnvWrapper + VecMPEEnvWrapper (JaxMARL MPE)
   smax_env_wrapper.py     # stub for future SMAC wrapper
 utils/
-  transforms.py           # DiscreteSupport, scalar_to_support, support_to_scalar
+  transforms.py           # DiscreteSupport, scalar_to_support, support_to_scalar, muzero_scale/inv
   replay_buffer.py        # ReplayBuffer, ReplayItem, Episode, Transition, process_episode
   logging_utils.py        # logger singleton
 tests/
@@ -83,16 +90,17 @@ tests/
 - `LearnerActor` (GPU): pulls batches from `ReplayBufferActor`, runs JIT-compiled training step, serves updated params.
 - `DataActor` (CPU, N instances): runs MCTS episodes, ships `ReplayItem`s to the buffer. Syncs params every `param_update_interval` episodes.
 - `ReplayBufferActor`: wraps `ReplayBuffer` (prioritized experience replay) backed by pre-allocated NumPy arrays.
-- `training/loop.py`: `run_warmup()` fills the buffer; `run_training_loop()` drives both learner and actors asynchronously via `ray.wait`.
+- `ReanalyzeActor` (CPU, optional): continuously re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Updates only position 0 (root) of each stored sequence. Controlled by `num_reanalyze_actors` and `reanalyze_batch_size` in `TrainConfig`.
+- `training/loop.py`: `run_warmup()` fills the buffer; `run_training_loop()` drives learner, data actors, and reanalyze actors asynchronously via `ray.wait`.
 
 **World model** (`model/`):
 - `FlaxMAMuZeroNet`: top-level Flax module with four sub-networks.
   - `RepresentationNetwork`: per-agent observation → latent state `(B, N, D)`.
   - `DynamicsNetwork`: latent + joint action → next latent + reward logits. Optionally prepends `TransformerAttentionEncoder` for inter-agent communication.
   - `PredictionNetwork`: latent → per-agent policy logits `(B, N, A)` + centralized value logits.
-  - `ProjectionNetwork`: SimSiam-style consistency head (online branch has prediction MLP; target branch does not).
-- Reward and value are **categorical distributions** over a discrete support (tz-transform). Use `utils.transforms.scalar_to_support` / `support_to_scalar` to convert.
-- `model.__call__` = initial inference; `model.recurrent_inference` = dynamics unroll (used inside MCTS simulations).
+  - `ProjectionNetwork`: BYOL-style EMA consistency head. Online branch applies projection + prediction MLP; target branch applies projection only using a slowly-moving EMA copy of the params (`ema_decay=0.999`, updated in `LearnerActor.train()` outside the JIT boundary).
+- Reward and value are **categorical distributions** over a discrete support (tz-transform). Use `utils.transforms.scalar_to_support` / `support_to_scalar` to convert. The scaling functions are `muzero_scale` / `muzero_scale_inv` (in `utils/transforms.py`).
+- `model.__call__` = initial inference; `model.recurrent_inference` = dynamics unroll (used inside MCTS simulations); `model.predict` = prediction head only (used by `MCTSIndependentPlanner` for non-searching agent priors).
 
 **MCTS planners** (`mcts/`):
 - `MCTSPlanner` (base): common config, `DiscreteSupport` objects, Dirichlet noise. Public entry point: `planner.plan(params, rng_key, obs)`.
@@ -106,7 +114,6 @@ tests/
 
 ## Key TODOs in the Codebase
 
-- Reanalyze actors to reduce stale data in the replay buffer
 - Environment wrapper abstract base class (`envs/base.py`)
 - SMAC/jaxMARL environment wrapper (`envs/smax_env_wrapper.py` is a stub)
 - Unit tests for `utils/` and `train.py`
@@ -139,15 +146,7 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 - **[easy] Flashbax for the replay buffer** — [instadeep/flashbax](https://github.com/instadeep/flashbax) is a JAX-native PER buffer. Replace `ReplayBuffer` with `flashbax.make_prioritised_flat_buffer`. Eliminates the CPU→GPU batch transfer on every training step, which is the main bottleneck in the current data pipeline. Also provides a proper segment tree for O(log n) priority updates vs. the current O(n) recomputation.
 
-- **[easy] Vectorized environment rollouts** — JaxMARL supports `jax.vmap` over `env.reset` and `env.step`. The `MPEEnvWrapper` currently returns batch size 1. Wrapping in `jax.vmap` allows running B parallel environments and returning `(B, N, obs)` directly, multiplying data throughput without changing the architecture.
-
-- **[easy] Remove `use_logits` from `support_to_scalar`** — the parameter is always `True` in practice; remove it and unconditionally apply softmax.
-
-- **[easy] Rename `_h`/`_h_inv`** → `muzero_scale` / `muzero_scale_inv` for readability.
-
 ### Model
-
-- **[easy] EMA target encoder** — replace the SimSiam-style consistency head with a BYOL-style exponential moving average (EMA) target network. EMA targets are more stable and remove the need for the stop-gradient trick inside `project_target`. Requires adding an EMA parameter update step in the training loop.
 
 - **[easy] Observation normalization** — add a running mean/variance normalization layer at the top of `RepresentationNetwork`. Stabilizes training when observation scales vary across environments. Can be implemented as a `flax.linen.Module` that updates running stats via `self.variable('stats', ...)`.
 
@@ -174,9 +173,5 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 - **[research] Count-based / intrinsic exploration** — add an exploration bonus to the MCTS root value based on visitation counts or a learned density model. Helps in sparse-reward cooperative tasks where the agents need to discover coordinated behaviors.
 
 ### Training / Infrastructure
-
-- **[easy] Standalone eval script** — a `eval.py` that loads a checkpoint, runs N episodes with MCTS (no training), and logs mean return. Useful for comparing runs without re-training.
-
-- **[medium] Reanalyze actors** — add a dedicated `ReanalyzeActor` that re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Standard in MuZero but not yet implemented.
 
 - **[major] Synchronous training loop** — replace the `ray.wait()`-based async loop with a sequential `ray.get()` loop. Simpler to reason about; prerequisite for on-policy MuZero variants. Treat as an architecture change, not a small cleanup.

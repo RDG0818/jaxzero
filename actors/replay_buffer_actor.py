@@ -31,6 +31,12 @@ class ReplayBufferActor:
     def sample(self, batch_size: int):
         return self.buffer.sample(batch_size)
 
+    def sample_for_reanalysis(self, batch_size: int):
+        return self.buffer.sample_for_reanalysis(batch_size)
+
+    def update_targets(self, indices, policy_targets, root_values):
+        self.buffer.update_targets(indices, policy_targets, root_values)
+
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         self.buffer.update_priorities(indices, priorities)
 

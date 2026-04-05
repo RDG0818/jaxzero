@@ -44,14 +44,21 @@ def run_warmup(data_actors: list, replay_buffer, config: ExperimentConfig) -> di
 
 
 def run_training_loop(
-    learner, data_actors: list, replay_buffer, actor_tasks: dict, config: ExperimentConfig,
+    learner,
+    data_actors: list,
+    replay_buffer,
+    actor_tasks: dict,
+    config: ExperimentConfig,
+    reanalyze_actors: list = None,
 ):
     """
     Main training loop.
 
-    The learner and actors run fully asynchronously. ray.wait dispatches on
-    whichever task finishes first so neither blocks the other. The learner
-    fires a new training step immediately after each step completes.
+    The learner, data actors, and (optionally) reanalyze actors run fully
+    asynchronously. ray.wait dispatches on whichever task finishes first.
+    The learner fires a new training step immediately after each step completes.
+    Reanalyze actors continuously re-run MCTS on stored observations to freshen
+    policy/value targets with the latest model params.
     """
     if config.train.wandb_mode != "disabled":
         import wandb
@@ -62,11 +69,15 @@ def run_training_loop(
     train_losses: deque = deque(maxlen=config.train.log_interval)
     interval_start = time.monotonic()
 
+    reanalyze_tasks = {}
+    if reanalyze_actors:
+        reanalyze_tasks = {actor.run_reanalyze.remote(): actor for actor in reanalyze_actors}
+
     learner_task = learner.train.remote()
     logger.info("Starting main training loop...")
 
     while episodes_processed < config.train.num_episodes:
-        all_pending = list(actor_tasks.keys()) + [learner_task]
+        all_pending = list(actor_tasks.keys()) + list(reanalyze_tasks.keys()) + [learner_task]
         done_refs, _ = ray.wait(all_pending, num_returns=1)
         done_ref = done_refs[0]
 
@@ -78,6 +89,11 @@ def run_training_loop(
                 if config.train.wandb_mode != "disabled":
                     wandb.log(metrics, step=episodes_processed)
             learner_task = learner.train.remote()
+
+        elif done_ref in reanalyze_tasks:
+            ray.get(done_ref)
+            finished_reanalyze = reanalyze_tasks.pop(done_ref)
+            reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:
             ep_return = ray.get(done_ref)

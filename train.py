@@ -26,7 +26,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from config import ExperimentConfig, ModelConfig, MCTSConfig, TrainConfig
 from utils.logging_utils import logger
-from actors import ReplayBufferActor, LearnerActor, DataActor
+from actors import ReplayBufferActor, LearnerActor, DataActor, ReanalyzeActor
 from training import run_warmup, run_training_loop, run_training_loop_sync
 
 
@@ -57,7 +57,11 @@ def initialize_actors(obs_size: int, action_size: int, config: ExperimentConfig)
         DataActor.remote(i, obs_size, action_size, learner, replay_buffer, config)
         for i in range(config.train.num_actors)
     ]
-    return replay_buffer, learner, data_actors
+    reanalyze_actors = [
+        ReanalyzeActor.remote(i, obs_size, action_size, learner, replay_buffer, config)
+        for i in range(config.train.num_reanalyze_actors)
+    ]
+    return replay_buffer, learner, data_actors, reanalyze_actors
 
 
 def _build_config(cfg: DictConfig) -> ExperimentConfig:
@@ -84,14 +88,16 @@ def main(cfg: DictConfig):
     obs_size, action_size = ray.get(_fetch_env_metadata.remote(config))
     logger.info(f"Env: obs_size={obs_size}, action_size={action_size}")
 
-    replay_buffer, learner, data_actors = initialize_actors(obs_size, action_size, config)
+    replay_buffer, learner, data_actors, reanalyze_actors = initialize_actors(obs_size, action_size, config)
 
     logger.info("Compiling plan_fn (one warm-up episode per actor)...")
     ray.get([actor.run_episode.remote() for actor in data_actors])
 
     actor_tasks = run_warmup(data_actors, replay_buffer, config)
-    loop_fn = run_training_loop_sync if config.train.sync else run_training_loop
-    loop_fn(learner, data_actors, replay_buffer, actor_tasks, config)
+    if config.train.sync:
+        run_training_loop_sync(learner, data_actors, replay_buffer, actor_tasks, config)
+    else:
+        run_training_loop(learner, data_actors, replay_buffer, actor_tasks, config, reanalyze_actors=reanalyze_actors)
 
     if config.train.wandb_mode != "disabled":
         import wandb
