@@ -52,6 +52,7 @@ class ReanalyzeActor:
         planner = planner_map[config.mcts.planner_mode](model=model, config=config)
         self.plan_fn = jax.jit(planner.plan)
         self.params = ray.get(learner_actor.get_params.remote())
+        self._param_future = None
         self.profiler = Profiler(f"reanalyze[{actor_id}]", log_interval=config.train.debug_interval)
         logger.info(f"(ReanalyzeActor {actor_id} pid={os.getpid()}) Setup complete.")
 
@@ -72,8 +73,15 @@ class ReanalyzeActor:
         if indices is None:
             return
 
+        # Resolve previous async param fetch (if ready), then fire the next one.
         with self.profiler.time("param_sync"):
-            self.params = ray.get(self.learner.get_params.remote())
+            if self._param_future is not None:
+                ready, _ = ray.wait([self._param_future], timeout=0)
+                if ready:
+                    self.params = ray.get(self._param_future)
+                    self._param_future = None
+            if self._param_future is None:
+                self._param_future = self.learner.get_params.remote()
 
         with self.profiler.time("mcts_plan"):
             self.rng_key, plan_key = jax.random.split(self.rng_key)

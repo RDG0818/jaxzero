@@ -80,12 +80,24 @@ def run_training_loop(
     learner_task = learner.run_training_loop.remote(learner_steps_per_call)
     logger.info("Starting main training loop...")
 
+    # Loop profiling counters.
+    _loop_learner_completions = 0
+    _loop_data_completions = 0
+    _loop_reanalyze_completions = 0
+    _loop_last_learner_t = time.monotonic()
+    _loop_learner_gaps: list = []
+
     while episodes_processed < config.train.num_episodes:
         all_pending = list(actor_tasks.keys()) + list(reanalyze_tasks.keys()) + [learner_task]
         done_refs, _ = ray.wait(all_pending, num_returns=1)
         done_ref = done_refs[0]
 
         if done_ref == learner_task:
+            now = time.monotonic()
+            _loop_learner_gaps.append(now - _loop_last_learner_t)
+            _loop_last_learner_t = now
+            _loop_learner_completions += 1
+
             metrics = ray.get(learner_task)
             if metrics is not None:
                 train_losses.append(metrics["total_loss"])
@@ -96,11 +108,13 @@ def run_training_loop(
 
         elif done_ref in reanalyze_tasks:
             ray.get(done_ref)
+            _loop_reanalyze_completions += 1
             finished_reanalyze = reanalyze_tasks.pop(done_ref)
             reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:
             ep_return = ray.get(done_ref)
+            _loop_data_completions += 1
             returns.append(ep_return)
             episodes_processed += config.train.num_envs_per_actor
 
@@ -122,6 +136,21 @@ def run_training_loop(
                     f"eps/s: {eps_per_sec:.1f} | "
                     f"train steps/s: {steps_per_sec:.1f}"
                 )
+
+                # Loop profiling: shows how the main loop is spending its time.
+                if _loop_learner_gaps:
+                    avg_learner_gap_ms = np.mean(_loop_learner_gaps) * 1000
+                    logger.info(
+                        f"  [loop profile] learner_calls={_loop_learner_completions} "
+                        f"(avg gap={avg_learner_gap_ms:.0f}ms, "
+                        f"expected={learner_steps_per_call * 30:.0f}ms)  |  "
+                        f"data_completions={_loop_data_completions}  |  "
+                        f"reanalyze_completions={_loop_reanalyze_completions}"
+                    )
+                _loop_learner_completions = 0
+                _loop_data_completions = 0
+                _loop_reanalyze_completions = 0
+                _loop_learner_gaps.clear()
 
                 if config.train.debug:
                     buf_stats = ray.get(replay_buffer.get_stats.remote())
