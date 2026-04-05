@@ -80,10 +80,16 @@ tree_util.register_pytree_node(
 
 class ReplayBuffer:
     """
-    Prioritized experience replay backed by pre-allocated NumPy arrays.
+    Prioritized experience replay.
 
-    All data lives in fixed-size arrays — no copies on add, O(1) priority
-    updates, and O(n) weighted sampling (fast for n <= 100k with numpy).
+    Data lives in pre-allocated NumPy arrays for O(1) indexed writes and
+    in-place target updates (used by ReanalyzeActor). Priority sampling uses
+    a cpprb C++ segment tree for O(log n) weighted sampling and priority
+    updates instead of the O(n) NumPy softmax approach.
+
+    A tiny parallel cpprb buffer (1-scalar env_dict) acts as a pure priority
+    tree — its ring-buffer pointer stays in lock-step with ours so the indices
+    it returns directly index into the NumPy arrays.
     """
 
     def __init__(
@@ -97,6 +103,8 @@ class ReplayBuffer:
         beta_start: float,
         beta_frames: int,
     ):
+        from cpprb import PrioritizedReplayBuffer as _PRB
+
         self.capacity = capacity
         self.alpha = alpha
         self.beta_start = beta_start
@@ -109,13 +117,26 @@ class ReplayBuffer:
         self.value_targets   = np.zeros((capacity, unroll_steps + 1, num_agents),   dtype=np.float32)
         self.reward_targets  = np.zeros((capacity, unroll_steps, num_agents),        dtype=np.float32)
         self.agent_orders    = np.zeros((capacity, num_agents),                      dtype=np.int32)
-        self.priorities      = np.zeros(capacity,                                    dtype=np.float32)
+        # Small priorities array kept only for get_stats(); not used for sampling.
+        self._priorities_log = np.zeros(capacity, dtype=np.float32)
+
+        # cpprb priority tree — 1-scalar dummy payload to minimise per-add overhead.
+        # Its ring-buffer uses the same capacity so returned indices map 1-to-1 onto
+        # the NumPy arrays above.
+        self._ptree = _PRB(
+            capacity,
+            env_dict={"_": {"shape": 1, "dtype": np.float32}},
+            alpha=alpha,
+        )
 
         self.pointer = 0
         self.size    = 0
 
     def add(self, item: ReplayItem, priority: float):
         """Adds a ReplayItem, overwriting the oldest entry when full."""
+        priority = float(priority) if priority > 0 else (
+            self._priorities_log[:self.size].max() if self.size > 0 else 1.0
+        )
         idx = self.pointer
         self.observations[idx]   = item.observation
         self.actions[idx]        = item.actions
@@ -123,7 +144,10 @@ class ReplayBuffer:
         self.value_targets[idx]  = item.value_target
         self.reward_targets[idx] = item.reward_target
         self.agent_orders[idx]   = item.agent_order
-        self.priorities[idx]     = priority if priority > 0 else self.priorities[:self.size].max() if self.size > 0 else 1.0
+        self._priorities_log[idx] = priority
+
+        self._ptree.add(**{"_": np.zeros((1, 1), dtype=np.float32)},
+                        priorities=np.array([priority], dtype=np.float32))
 
         self.pointer = (self.pointer + 1) % self.capacity
         self.size    = min(self.size + 1, self.capacity)
@@ -136,15 +160,12 @@ class ReplayBuffer:
         if self.size == 0:
             return None, None, None
 
-        probs  = self.priorities[:self.size] ** self.alpha
-        probs /= probs.sum()
-
-        indices = np.random.choice(self.size, batch_size, p=probs)
-        beta    = min(1.0, self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames)
+        beta = min(1.0, self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames)
         self.frame_count += 1
 
-        weights  = (self.size * probs[indices]) ** (-beta)
-        weights /= weights.max()
+        s       = self._ptree.sample(batch_size, beta=beta)
+        indices = s["indexes"].astype(np.int64)
+        weights = s["weights"].astype(np.float32)
 
         batch = ReplayItem(
             observation   = self.observations[indices],
@@ -176,12 +197,13 @@ class ReplayBuffer:
         self.value_targets[indices, 0] = root_values[:, None]  # broadcast (B,) → (B, N)
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        self.priorities[indices] = priorities
+        self._priorities_log[indices] = priorities
+        self._ptree.update_priorities(indices, priorities)
 
     def get_stats(self) -> dict:
         if self.size == 0:
             return {"size": 0, "capacity": self.capacity, "fill_pct": 0.0}
-        active = self.priorities[:self.size]
+        active = self._priorities_log[:self.size]
         beta   = min(1.0, self.beta_start + self.frame_count * (1.0 - self.beta_start) / self.beta_frames)
         return {
             "size":          self.size,
