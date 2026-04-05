@@ -11,13 +11,18 @@ See actors/ for the actor implementations and training/ for the loop logic.
 
 Usage
 -----
-  python train.py                                  # default config
-  python train.py mcts=joint                       # switch to joint planner
-  python train.py train.num_episodes=50000         # override single value
-  python train.py train.batch_size=128 mcts.num_simulations=50
+  python train/muzero.py                                  # default config
+  python train/muzero.py mcts=joint                       # switch to joint planner
+  python train/muzero.py train.num_episodes=50000         # override single value
+  python train/muzero.py train.batch_size=128 mcts.num_simulations=50
 """
 
 import os
+import sys
+
+# Ensure project root is on sys.path when running as a script.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from typing import Tuple
 
 import ray
@@ -73,7 +78,7 @@ def _build_config(cfg: DictConfig) -> ExperimentConfig:
     )
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config")
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
     config = _build_config(cfg)
 
@@ -108,4 +113,3 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
-

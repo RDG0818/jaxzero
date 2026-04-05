@@ -11,10 +11,14 @@ pip install -r requirements.txt
 wandb login  # set wandb_mode to "online" in configs/train/default.yaml to enable
 
 # Run training
-python train.py                                  # default config
-python train.py mcts=joint                       # switch to joint planner
-python train.py train.num_episodes=50000         # override single value
-python train.py train.batch_size=128 mcts.num_simulations=50
+python train/muzero.py                                  # default config
+python train/muzero.py mcts=joint                       # switch to joint planner
+python train/muzero.py train.num_episodes=50000         # override single value
+python train/muzero.py train.batch_size=128 mcts.num_simulations=50
+
+# Run baselines
+python train/ippo.py
+python train/mappo.py
 
 # Evaluate a checkpoint
 python eval.py                                   # latest checkpoint, default config
@@ -39,10 +43,11 @@ Violating these rules causes silent failures or segfaults that are difficult to 
 ## Package Layout
 
 ```
-train.py                  # entry point (@hydra.main, builds ExperimentConfig, launches Ray actors)
+train/
+  muzero.py               # entry point (@hydra.main, builds ExperimentConfig, launches Ray actors)
+  ippo.py                 # entry point for IPPO baseline (pure JAX, no Ray)
+  mappo.py                # entry point for MAPPO baseline (pure JAX, no Ray)
 eval.py                   # standalone eval: loads checkpoint, runs N MCTS episodes, logs return
-train_ippo.py             # entry point for IPPO baseline (pure JAX, no Ray)
-train_mappo.py            # entry point for MAPPO baseline (pure JAX, no Ray)
 config.py                 # dataclasses only: ModelConfig, MCTSConfig, TrainConfig, ExperimentConfig
 configs/
   config.yaml             # root defaults (model: default, mcts: default, train: default)
@@ -86,7 +91,7 @@ tests/
 
 ## Architecture
 
-**Training system** (`train.py` + `actors/` + `training/`): Asynchronous actor-learner pattern using Ray.
+**Training system** (`train/muzero.py` + `actors/` + `training/`): Asynchronous actor-learner pattern using Ray.
 - `LearnerActor` (GPU): pulls batches from `ReplayBufferActor`, runs JIT-compiled training step, serves updated params.
 - `DataActor` (CPU, N instances): runs MCTS episodes, ships `ReplayItem`s to the buffer. Syncs params every `param_update_interval` episodes.
 - `ReplayBufferActor`: wraps `ReplayBuffer` (prioritized experience replay) backed by pre-allocated NumPy arrays.
@@ -110,7 +115,7 @@ tests/
 
 **Data flow**: `observation (B,N,obs_dim)` → representation → latent `(B,N,D)` → MCTS (calls `recurrent_inference` inside simulations) → `MCTSPlanOutput` → `Transition` → `Episode` → `process_episode` (n-step returns) → `ReplayItem` → `ReplayBuffer`.
 
-**Config** (`config.py` + `configs/`): Hydra composes YAML files into a `DictConfig`, which `_build_config()` in `train.py` converts to typed dataclasses (`ModelConfig`, `MCTSConfig`, `TrainConfig`, `ExperimentConfig`). The dataclass instance is passed explicitly to every Ray actor constructor — there is no global singleton. All three sub-configs are `frozen=True`.
+**Config** (`config.py` + `configs/`): Hydra composes YAML files into a `DictConfig`, which `_build_config()` in `train/muzero.py` converts to typed dataclasses (`ModelConfig`, `MCTSConfig`, `TrainConfig`, `ExperimentConfig`). The dataclass instance is passed explicitly to every Ray actor constructor — there is no global singleton. All three sub-configs are `frozen=True`.
 
 ## Key TODOs in the Codebase
 
@@ -144,7 +149,7 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 ### Utils
 
-- **[easy] Flashbax for the replay buffer** — [instadeep/flashbax](https://github.com/instadeep/flashbax) is a JAX-native PER buffer. Replace `ReplayBuffer` with `flashbax.make_prioritised_flat_buffer`. Eliminates the CPU→GPU batch transfer on every training step, which is the main bottleneck in the current data pipeline. Also provides a proper segment tree for O(log n) priority updates vs. the current O(n) recomputation.
+- **[easy] C++ segment tree for PER** — `ReplayBuffer` recomputes priorities over the entire buffer on every sample (O(n)). Replace with a C++ sum-tree (pybind11) for O(log n) updates and samples. This is the standard approach in Ape-X / R2D2 and directly benefits the async version. Note: Flashbax (JAX-native PER) was evaluated but is not suitable here — it requires arrays to live on GPU throughout, which is incompatible with the Ray multi-process architecture where the buffer must store NumPy arrays.
 
 ### Model
 
@@ -174,4 +179,4 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 ### Training / Infrastructure
 
-- **[major] Synchronous training loop** — replace the `ray.wait()`-based async loop with a sequential `ray.get()` loop. Simpler to reason about; prerequisite for on-policy MuZero variants. Treat as an architecture change, not a small cleanup.
+- **[easy] More DataActors** — the GPU learner is underutilized (~30%) because CPU MCTS actors don't generate data fast enough. Adding more `DataActor` instances (via `num_actors`) is the simplest way to keep the learner fed. GPU MCTS via mctx was evaluated as an alternative but is slower than CPU MCTS at the batch sizes used here (B≤32 per actor); GPU MCTS only wins at B≥256+.
