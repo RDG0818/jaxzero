@@ -5,6 +5,7 @@ import ray
 
 from config import ExperimentConfig
 from utils.logging_utils import logger
+from utils.profiler import Profiler
 
 
 @ray.remote(num_cpus=1)
@@ -51,6 +52,7 @@ class ReanalyzeActor:
         planner = planner_map[config.mcts.planner_mode](model=model, config=config)
         self.plan_fn = jax.jit(planner.plan)
         self.params = ray.get(learner_actor.get_params.remote())
+        self.profiler = Profiler(f"reanalyze[{actor_id}]", log_interval=config.train.debug_interval)
         logger.info(f"(ReanalyzeActor {actor_id} pid={os.getpid()}) Setup complete.")
 
     def run_reanalyze(self):
@@ -61,22 +63,28 @@ class ReanalyzeActor:
         import jax
         import jax.numpy as jnp
 
-        indices, observations, _ = ray.get(
-            self.replay_buffer.sample_for_reanalysis.remote(
-                self.config.train.reanalyze_batch_size
+        with self.profiler.time("sample_wait"):
+            indices, observations, _ = ray.get(
+                self.replay_buffer.sample_for_reanalysis.remote(
+                    self.config.train.reanalyze_batch_size
+                )
             )
-        )
         if indices is None:
             return
 
-        # Always sync to latest params so targets reflect the current model.
-        self.params = ray.get(self.learner.get_params.remote())
+        with self.profiler.time("param_sync"):
+            self.params = ray.get(self.learner.get_params.remote())
 
-        self.rng_key, plan_key = jax.random.split(self.rng_key)
-        plan_output = self.plan_fn(self.params, plan_key, jnp.array(observations))
+        with self.profiler.time("mcts_plan"):
+            self.rng_key, plan_key = jax.random.split(self.rng_key)
+            plan_output = self.plan_fn(self.params, plan_key, jnp.array(observations))
+            jax.block_until_ready(plan_output.policy_targets)
 
-        self.replay_buffer.update_targets.remote(
-            indices,
-            np.array(plan_output.policy_targets),  # (B, N, A)
-            np.array(plan_output.root_value),        # (B,)
-        )
+        with self.profiler.time("buffer_update"):
+            self.replay_buffer.update_targets.remote(
+                indices,
+                np.array(plan_output.policy_targets),
+                np.array(plan_output.root_value),
+            )
+
+        self.profiler.step()

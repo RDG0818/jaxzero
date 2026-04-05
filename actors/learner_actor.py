@@ -6,6 +6,7 @@ import ray
 
 from config import ExperimentConfig
 from utils.logging_utils import logger
+from utils.profiler import Profiler
 
 
 def make_train_step(model, optimizer, value_support, reward_support, config: ExperimentConfig):
@@ -243,6 +244,8 @@ class LearnerActor:
         # Kick off the first prefetch so train() has a batch ready immediately.
         self._prefetch_future = self.replay_buffer.sample.remote(config.train.batch_size)
 
+        self.profiler = Profiler("learner", log_interval=config.train.debug_interval)
+
         logger.info(f"(Learner pid={os.getpid()}) Setup complete.")
 
     def _prefetch_batch(self):
@@ -260,7 +263,8 @@ class LearnerActor:
         debug_interval = self.config.train.debug_interval
 
         # Resolve the prefetched batch (fired at end of previous step or __init__).
-        batch, weights, indices = ray.get(self._prefetch_future)
+        with self.profiler.time("sample_wait"):
+            batch, weights, indices = ray.get(self._prefetch_future)
         if batch is None:
             self._prefetch_batch()
             return None
@@ -279,22 +283,25 @@ class LearnerActor:
             )
 
         self.rng_key, train_key = jax.random.split(self.rng_key)
-        jax_batch = jax.tree_util.tree_map(jax.device_put, batch)
-        jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
+        with self.profiler.time("device_put"):
+            jax_batch = jax.tree_util.tree_map(jax.device_put, batch)
+            jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
 
-        t_step = time.monotonic()
-        self.params, self.opt_state, metrics, new_priorities = self.train_step(
-            self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
-        )
-        step_ms = (time.monotonic() - t_step) * 1000
+        with self.profiler.time("train_step"):
+            self.params, self.opt_state, metrics, new_priorities = self.train_step(
+                self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
+            )
+            jax.block_until_ready(self.params)  # accurate GPU timing
         self.train_step_count += 1
 
         # Update EMA parameters outside the JIT boundary (no recompilation needed).
-        decay = self.config.train.ema_decay
-        self.ema_params = jax.tree_util.tree_map(
-            lambda e, p: decay * e + (1.0 - decay) * p,
-            self.ema_params, self.params,
-        )
+        with self.profiler.time("ema_update"):
+            decay = self.config.train.ema_decay
+            self.ema_params = jax.tree_util.tree_map(
+                lambda e, p: decay * e + (1.0 - decay) * p,
+                self.ema_params, self.params,
+            )
+            jax.block_until_ready(self.ema_params)
 
         self.replay_buffer.update_priorities.remote(indices, np.array(new_priorities))
 
@@ -324,10 +331,10 @@ class LearnerActor:
                 f"policy={metrics['policy_loss']:.4f} "
                 f"value={metrics['value_loss']:.4f} "
                 f"consistency={metrics['consistency_loss']:.4f} | "
-                f"grad_norm={grad_norm:.3f} | "
-                f"step_time={step_ms:.1f}ms"
+                f"grad_norm={grad_norm:.3f}"
             )
 
+        self.profiler.step()
         return metrics
 
     def _save_checkpoint(self):
