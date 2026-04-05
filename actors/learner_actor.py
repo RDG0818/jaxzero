@@ -274,7 +274,9 @@ class LearnerActor:
         # Fire the next sample immediately so buffer works in parallel with GPU.
         self._prefetch_batch()
 
-        self.rng_key, train_key = jax.random.split(self.rng_key)
+        with self.profiler.time("rng_split"):
+            self.rng_key, train_key = jax.random.split(self.rng_key)
+
         with self.profiler.time("device_put"):
             jax_batch = jax.tree_util.tree_map(jax.device_put, batch)
             jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
@@ -290,13 +292,16 @@ class LearnerActor:
             self.ema_params = self.ema_update(self.ema_params, self.params)
             jax.block_until_ready(self.ema_params)
 
-        self.replay_buffer.update_priorities.remote(indices, np.array(new_priorities))
+        with self.profiler.time("priority_copy"):
+            priorities_np = np.array(new_priorities)
+        self.replay_buffer.update_priorities.remote(indices, priorities_np)
 
         if self.train_step_count % self.config.train.checkpoint_interval == 0:
             self._save_checkpoint()
 
-        metrics = {k: float(v) for k, v in metrics.items()}
-        metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
+        with self.profiler.time("metrics_convert"):
+            metrics = {k: float(v) for k, v in metrics.items()}
+            metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
 
         total_loss = metrics["total_loss"]
         grad_norm = metrics["grad_norm"]
