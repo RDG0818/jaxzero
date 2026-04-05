@@ -300,7 +300,9 @@ class LearnerActor:
             self._save_checkpoint()
 
         with self.profiler.time("metrics_convert"):
-            metrics = {k: float(v) for k, v in metrics.items()}
+            # jax.device_get transfers the whole dict in one batched D2H call
+            # instead of one PCIe round-trip per scalar.
+            metrics = {k: float(v) for k, v in jax.device_get(metrics).items()}
             metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
 
         total_loss = metrics["total_loss"]
