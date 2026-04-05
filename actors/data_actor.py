@@ -69,6 +69,7 @@ class DataActor:
         # Single JIT boundary: DataActor owns compilation of the plan function.
         self.plan_fn = jax.jit(planner.plan)
         self.params = ray.get(learner_actor.get_params.remote())
+        self._param_future = None  # in-flight async param fetch, if any
         self.profiler = Profiler(f"data_actor[{actor_id}]", log_interval=config.train.debug_interval)
         logger.info(f"(DataActor {actor_id} pid={os.getpid()}) Setup complete.")
 
@@ -160,10 +161,20 @@ class DataActor:
                 self.replay_buffer.add.remote(all_items, [1.0] * len(all_items))
 
         self.episodes_since_update += B
+
+        # Param sync: resolve any in-flight fetch from the previous episode, then
+        # immediately fire the next one so it runs during the next episode's MCTS.
         with self.profiler.time("param_sync"):
-            if self.episodes_since_update >= self.config.train.param_update_interval:
-                self.params = ray.get(self.learner.get_params.remote())
-                self.episodes_since_update = 0
+            if self._param_future is not None:
+                ready, _ = ray.wait([self._param_future], timeout=0)
+                if ready:
+                    self.params = ray.get(self._param_future)
+                    self._param_future = None
+                    self.episodes_since_update = 0
+
+            if (self._param_future is None
+                    and self.episodes_since_update >= self.config.train.param_update_interval):
+                self._param_future = self.learner.get_params.remote()
 
         self.profiler.step()
 

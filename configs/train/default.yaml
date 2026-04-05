@@ -11,7 +11,7 @@ replay_buffer_beta_start: 0.4
 replay_buffer_beta_frames: 100000
 batch_size: 256
 learning_rate: 3e-4
-param_update_interval: 20
+param_update_interval: 100
 end_lr_factor: 0.1
 lr_warmup_steps: 5000
 value_scale: 0.25
