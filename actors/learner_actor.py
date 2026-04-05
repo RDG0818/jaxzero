@@ -329,11 +329,20 @@ class LearnerActor:
         the learner stays on GPU continuously rather than waiting for the
         main process to re-dispatch it after each step.
         """
+        t_start = time.monotonic()
         metrics = None
+        steps_done = 0
         for _ in range(num_steps):
             result = self._train_step()
             if result is not None:
                 metrics = result
+                steps_done += 1
+        if steps_done > 0:
+            wall_ms = (time.monotonic() - t_start) * 1000
+            logger.info(
+                f"(Learner) run_training_loop: {steps_done} steps | "
+                f"wall={wall_ms:.0f}ms | avg_per_step={wall_ms/steps_done:.1f}ms"
+            )
         return metrics  # last non-None metrics, or None if buffer was empty
 
     # Keep a single-step entry point for the sync training loop.
