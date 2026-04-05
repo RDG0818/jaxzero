@@ -56,7 +56,7 @@ def _fetch_env_metadata(config: ExperimentConfig) -> Tuple[int, int]:
 
 
 def initialize_actors(obs_size: int, action_size: int, config: ExperimentConfig):
-    replay_buffer = ReplayBufferActor.options(num_cpus=4).remote(obs_size, action_size, config)
+    replay_buffer = ReplayBufferActor.remote(obs_size, action_size, config)
     learner = LearnerActor.remote(obs_size, action_size, replay_buffer, config)
     data_actors = [
         DataActor.remote(i, obs_size, action_size, learner, replay_buffer, config)
