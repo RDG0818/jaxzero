@@ -210,6 +210,13 @@ class LearnerActor:
             model, optimizer, value_support, reward_support, config
         )
 
+        # JIT the EMA update. Without JIT, tree_map dispatches one GPU kernel
+        # per parameter leaf (dozens of small launches). JIT fuses them into one.
+        decay = config.train.ema_decay
+        self.ema_update = jax.jit(lambda ema, params: jax.tree_util.tree_map(
+            lambda e, p: decay * e + (1.0 - decay) * p, ema, params
+        ))
+
         # Checkpointing — restore latest checkpoint if one exists.
         ckpt_dir = Path(config.train.checkpoint_dir).absolute()
         self.ckpt_manager = ocp.CheckpointManager(
@@ -294,13 +301,8 @@ class LearnerActor:
             jax.block_until_ready(self.params)  # accurate GPU timing
         self.train_step_count += 1
 
-        # Update EMA parameters outside the JIT boundary (no recompilation needed).
         with self.profiler.time("ema_update"):
-            decay = self.config.train.ema_decay
-            self.ema_params = jax.tree_util.tree_map(
-                lambda e, p: decay * e + (1.0 - decay) * p,
-                self.ema_params, self.params,
-            )
+            self.ema_params = self.ema_update(self.ema_params, self.params)
             jax.block_until_ready(self.ema_params)
 
         self.replay_buffer.update_priorities.remote(indices, np.array(new_priorities))
