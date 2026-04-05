@@ -92,11 +92,12 @@ tests/
 ## Architecture
 
 **Training system** (`train/muzero.py` + `actors/` + `training/`): Asynchronous actor-learner pattern using Ray.
-- `LearnerActor` (GPU): pulls batches from `ReplayBufferActor`, runs JIT-compiled training step, serves updated params.
-- `DataActor` (CPU, N instances): runs MCTS episodes, ships `ReplayItem`s to the buffer. Syncs params every `param_update_interval` episodes.
+- `LearnerActor` (GPU): runs a self-driving training loop (`run_training_loop(N)`) that executes N steps internally before returning to the main loop. Eliminates Ray round-trip overhead between steps. Prefetches the next batch from the buffer while the GPU trains. EMA update is JIT-compiled to avoid per-leaf kernel launches.
+- `DataActor` (CPU, N instances): runs MCTS episodes, ships `ReplayItem`s to the buffer. Syncs params asynchronously (fires `get_params.remote()` at end of episode, resolves at start of next) so the 300ms transfer overlaps with MCTS compute.
 - `ReplayBufferActor`: wraps `ReplayBuffer` (prioritized experience replay) backed by pre-allocated NumPy arrays.
 - `ReanalyzeActor` (CPU, optional): continuously re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Updates only position 0 (root) of each stored sequence. Controlled by `num_reanalyze_actors` and `reanalyze_batch_size` in `TrainConfig`.
 - `training/loop.py`: `run_warmup()` fills the buffer; `run_training_loop()` drives learner, data actors, and reanalyze actors asynchronously via `ray.wait`.
+- `utils/profiler.py`: `Profiler` class used in all actors. Reports mean time per named operation every `debug_interval` steps. JAX note: always call `jax.block_until_ready()` inside a `profiler.time()` block to measure actual GPU/CPU compute, not just async dispatch time.
 
 **World model** (`model/`):
 - `FlaxMAMuZeroNet`: top-level Flax module with four sub-networks.
@@ -179,4 +180,6 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 ### Training / Infrastructure
 
-- **[easy] More DataActors** — the GPU learner is underutilized (~30%) because CPU MCTS actors don't generate data fast enough. Adding more `DataActor` instances (via `num_actors`) is the simplest way to keep the learner fed. GPU MCTS via mctx was evaluated as an alternative but is slower than CPU MCTS at the batch sizes used here (B≤32 per actor); GPU MCTS only wins at B≥256+.
+- **[easy] Increase `batch_size`** — current bottleneck is Ray scheduling overhead between learner steps (~30ms gap vs ~28ms GPU compute). Larger batches amortize this overhead by doing more GPU work per step. Try 512 or 1024.
+- **[easy] C++ segment tree for PER** — `ReplayBuffer.sample()` does an O(n) `priorities**alpha / sum` scan every step. At buffer size 100k this is measurable. A sum-tree gives O(log n). Currently hidden by the prefetch but will matter at higher train steps/s.
+- **[note] More DataActors** — GPU learner was underutilized due to Ray round-trip overhead (now fixed with self-driving loop) and slow param sync (now async). Adding more actors still helps data throughput but is no longer the primary bottleneck.

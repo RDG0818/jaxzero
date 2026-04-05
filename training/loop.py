@@ -73,7 +73,11 @@ def run_training_loop(
     if reanalyze_actors:
         reanalyze_tasks = {actor.run_reanalyze.remote(): actor for actor in reanalyze_actors}
 
-    learner_task = learner.train.remote()
+    # Steps per learner call: run the learner for this many steps before
+    # returning to the main loop. Higher values reduce Ray round-trip overhead
+    # at the cost of coarser-grained metrics reporting.
+    learner_steps_per_call = max(1, config.train.log_interval // 10)
+    learner_task = learner.run_training_loop.remote(learner_steps_per_call)
     logger.info("Starting main training loop...")
 
     while episodes_processed < config.train.num_episodes:
@@ -85,10 +89,10 @@ def run_training_loop(
             metrics = ray.get(learner_task)
             if metrics is not None:
                 train_losses.append(metrics["total_loss"])
-                train_steps += 1
+                train_steps += learner_steps_per_call
                 if config.train.wandb_mode != "disabled":
                     wandb.log(metrics, step=episodes_processed)
-            learner_task = learner.train.remote()
+            learner_task = learner.run_training_loop.remote(learner_steps_per_call)
 
         elif done_ref in reanalyze_tasks:
             ray.get(done_ref)

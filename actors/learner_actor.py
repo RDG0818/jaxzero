@@ -261,33 +261,18 @@ class LearnerActor:
             self.config.train.batch_size
         )
 
-    def train(self):
-        """Samples a batch, runs one training step, updates priorities.
-        Returns a metrics dict, or None if the buffer is empty."""
+    def _train_step(self):
+        """Runs one training step. Returns metrics dict or None if buffer empty."""
         import jax
 
-        debug = self.config.train.debug
-        debug_interval = self.config.train.debug_interval
-
-        # Resolve the prefetched batch (fired at end of previous step or __init__).
         with self.profiler.time("sample_wait"):
             batch, weights, indices = ray.get(self._prefetch_future)
         if batch is None:
             self._prefetch_batch()
             return None
 
-        # Fire the NEXT sample request immediately so the buffer works in
-        # parallel with the GPU training step below.
+        # Fire the next sample immediately so buffer works in parallel with GPU.
         self._prefetch_batch()
-
-        if debug and self.train_step_count % debug_interval == 0:
-            logger.info(
-                f"(Learner) step={self.train_step_count} | "
-                f"batch obs shape={batch.observation.shape} | "
-                f"value_target [{batch.value_target.min():.3f}, {batch.value_target.max():.3f}] "
-                f"mean={batch.value_target.mean():.3f} | "
-                f"IS weights [{weights.min():.3f}, {weights.max():.3f}]"
-            )
 
         self.rng_key, train_key = jax.random.split(self.rng_key)
         with self.profiler.time("device_put"):
@@ -298,7 +283,7 @@ class LearnerActor:
             self.params, self.opt_state, metrics, new_priorities = self.train_step(
                 self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
             )
-            jax.block_until_ready(self.params)  # accurate GPU timing
+            jax.block_until_ready(self.params)
         self.train_step_count += 1
 
         with self.profiler.time("ema_update"):
@@ -313,18 +298,15 @@ class LearnerActor:
         metrics = {k: float(v) for k, v in metrics.items()}
         metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
 
-        # NaN/Inf guard — always warn, not just in debug mode.
         total_loss = metrics["total_loss"]
         grad_norm = metrics["grad_norm"]
         if not np.isfinite(total_loss):
-            logger.warning(
-                f"(Learner) step={self.train_step_count} non-finite total_loss={total_loss:.4f}"
-            )
+            logger.warning(f"(Learner) step={self.train_step_count} non-finite total_loss={total_loss:.4f}")
         if not np.isfinite(grad_norm):
-            logger.warning(
-                f"(Learner) step={self.train_step_count} non-finite grad_norm={grad_norm:.4f}"
-            )
+            logger.warning(f"(Learner) step={self.train_step_count} non-finite grad_norm={grad_norm:.4f}")
 
+        debug = self.config.train.debug
+        debug_interval = self.config.train.debug_interval
         if debug and self.train_step_count % debug_interval == 0:
             logger.info(
                 f"(Learner) step={self.train_step_count} | "
@@ -338,6 +320,25 @@ class LearnerActor:
 
         self.profiler.step()
         return metrics
+
+    def run_training_loop(self, num_steps: int):
+        """Runs a tight internal training loop for num_steps steps.
+
+        Called once from the main loop per log interval instead of once per
+        step. Eliminates Ray round-trip overhead between training steps —
+        the learner stays on GPU continuously rather than waiting for the
+        main process to re-dispatch it after each step.
+        """
+        metrics = None
+        for _ in range(num_steps):
+            result = self._train_step()
+            if result is not None:
+                metrics = result
+        return metrics  # last non-None metrics, or None if buffer was empty
+
+    # Keep a single-step entry point for the sync training loop.
+    def train(self):
+        return self._train_step()
 
     def _save_checkpoint(self):
         import orbax.checkpoint as ocp

@@ -100,7 +100,10 @@ class DataActor:
             self.rng_key, plan_key, step_key = jax.random.split(self.rng_key, 3)
 
             with self.profiler.time("plan"):
+                # block_until_ready ensures we measure actual MCTS compute, not
+                # just async dispatch time (JAX on CPU is also async).
                 plan_output = self.plan_fn(self.params, plan_key, observations)
+                jax.block_until_ready(plan_output.policy_targets)
 
             with self.profiler.time("device_get"):
                 # plan_output.joint_action:   (B, N)
