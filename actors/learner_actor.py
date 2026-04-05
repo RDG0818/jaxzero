@@ -240,7 +240,16 @@ class LearnerActor:
         else:
             logger.info(f"(Learner pid={os.getpid()}) No checkpoint found — starting fresh.")
 
+        # Kick off the first prefetch so train() has a batch ready immediately.
+        self._prefetch_future = self.replay_buffer.sample.remote(config.train.batch_size)
+
         logger.info(f"(Learner pid={os.getpid()}) Setup complete.")
+
+    def _prefetch_batch(self):
+        """Fires a non-blocking sample request and stores the future."""
+        self._prefetch_future = self.replay_buffer.sample.remote(
+            self.config.train.batch_size
+        )
 
     def train(self):
         """Samples a batch, runs one training step, updates priorities.
@@ -250,11 +259,15 @@ class LearnerActor:
         debug = self.config.train.debug
         debug_interval = self.config.train.debug_interval
 
-        batch, weights, indices = ray.get(
-            self.replay_buffer.sample.remote(self.config.train.batch_size)
-        )
+        # Resolve the prefetched batch (fired at end of previous step or __init__).
+        batch, weights, indices = ray.get(self._prefetch_future)
         if batch is None:
+            self._prefetch_batch()
             return None
+
+        # Fire the NEXT sample request immediately so the buffer works in
+        # parallel with the GPU training step below.
+        self._prefetch_batch()
 
         if debug and self.train_step_count % debug_interval == 0:
             logger.info(
