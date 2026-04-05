@@ -25,6 +25,7 @@ project_name: myzero1
 checkpoint_dir: checkpoints
 checkpoint_interval: 2500
 num_envs_per_actor: 4  # parallel environments per DataActor
+sync: false            # use synchronous training loop (simpler but ~2-3x slower)
 ema_decay: 0.999       # EMA decay for target encoder (BYOL-style consistency loss)
 num_reanalyze_actors: 1
 reanalyze_batch_size: 256
