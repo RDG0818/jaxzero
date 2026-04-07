@@ -37,7 +37,7 @@ class DataActor:
         import jax
         from model import FlaxMAMuZeroNet
         from mcts import MCTSIndependentPlanner, MCTSJointPlanner
-        from envs import VecMPEEnvWrapper
+        from envs import make_vec_env_wrapper
 
         self.actor_id = actor_id
         self.config = config
@@ -47,7 +47,7 @@ class DataActor:
 
         self.rng_key = jax.random.PRNGKey(actor_id * 1337 + 7)
 
-        self.env = VecMPEEnvWrapper(
+        self.env = make_vec_env_wrapper(
             config.train.env_name,
             config.train.num_agents,
             config.train.max_episode_steps,

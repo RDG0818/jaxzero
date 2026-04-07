@@ -40,14 +40,14 @@ def _fetch_env_metadata(config: ExperimentConfig) -> Tuple[int, int]:
     """
     Returns (obs_size, action_size) by instantiating a temporary env.
 
-    Runs as a Ray task so JAX (imported transitively by MPEEnvWrapper) is
+    Runs as a Ray task so JAX (imported transitively by env wrappers) is
     never initialized in the main process, preserving GPU memory for LearnerActor.
     """
     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     os.environ["JAX_PLATFORMS"] = "cpu"
-    from envs import MPEEnvWrapper
+    from envs import make_env_wrapper
 
-    env = MPEEnvWrapper(
+    env = make_env_wrapper(
         config.train.env_name,
         config.train.num_agents,
         config.train.max_episode_steps,

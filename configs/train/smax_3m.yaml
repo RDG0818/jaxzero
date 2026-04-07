@@ -1,0 +1,14 @@
+# SMAX 3m scenario: 3 allies vs 3 scripted marine enemies.
+# Usage: python train/muzero.py train=smax_3m
+#
+# Other common scenarios:
+#   8m:    num_agents=8,  max_episode_steps=120
+#   2s3z:  num_agents=5,  max_episode_steps=150  (2 stalkers + 3 zealots)
+#   3s5z:  num_agents=8,  max_episode_steps=150
+
+defaults:
+  - default
+
+env_name: 3m
+num_agents: 3
+max_episode_steps: 150
