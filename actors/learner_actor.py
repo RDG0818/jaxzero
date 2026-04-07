@@ -125,25 +125,34 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 - batch.value_target[:, 0].mean(axis=1)
             )
 
-            metrics = {
-                "total_loss": total_loss,
-                "reward_loss": reward_loss.mean(),
-                "policy_loss": policy_loss.mean(),
-                "value_loss": value_loss.mean(),
-                "consistency_loss": consistency_loss.mean(),
-            }
-            return total_loss, (metrics, td_error)
+            metric_scalars = jnp.stack([
+                total_loss,
+                reward_loss.mean(),
+                policy_loss.mean(),
+                value_loss.mean(),
+                consistency_loss.mean(),
+            ])
+            return total_loss, (metric_scalars, td_error)
 
-        (_, (metrics, td_error)), grads = jax.value_and_grad(
+        (_, (metric_scalars, td_error)), grads = jax.value_and_grad(
             loss_fn, has_aux=True
         )(params)
-        metrics["grad_norm"] = optax.global_norm(grads)
+        grad_norm = optax.global_norm(grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         new_params = optax.apply_updates(params, updates)
         new_priorities = td_error + 1e-6
 
-        return new_params, new_opt_state, metrics, new_priorities
+        # Pack all scalars that need D2H transfer into one contiguous array so
+        # the host pays for a single PCIe DMA transaction instead of one per scalar.
+        # Layout: [total, reward, policy, value, consistency, grad_norm, priorities...]
+        transfer_buf = jnp.concatenate([
+            metric_scalars,
+            grad_norm[jnp.newaxis],
+            new_priorities,
+        ])
+
+        return new_params, new_opt_state, transfer_buf, new_priorities
 
     return jax.jit(train_step)
 
@@ -282,31 +291,34 @@ class LearnerActor:
             jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
 
         with self.profiler.time("train_step"):
-            self.params, self.opt_state, metrics, new_priorities = self.train_step(
+            self.params, self.opt_state, transfer_buf, new_priorities = self.train_step(
                 self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
             )
-            # Block on all outputs so priority_copy and metrics_convert don't
-            # pay the wait cost — they're separate XLA outputs that may otherwise
-            # still be in flight when we try to transfer them.
-            jax.block_until_ready((self.params, metrics, new_priorities))
+            # Block on params and the transfer buffer (which contains metrics +
+            # priorities). new_priorities is a slice of transfer_buf so blocking
+            # on transfer_buf covers it too — one wait for all GPU outputs.
+            jax.block_until_ready((self.params, transfer_buf))
         self.train_step_count += 1
 
         with self.profiler.time("ema_update"):
             self.ema_params = self.ema_update(self.ema_params, self.params)
             jax.block_until_ready(self.ema_params)
 
-        with self.profiler.time("priority_copy"):
-            priorities_np = np.array(new_priorities)
+        with self.profiler.time("d2h_transfer"):
+            # Single PCIe DMA: transfer_buf = [total, reward, policy, value,
+            # consistency, grad_norm, priority_0, ..., priority_{B-1}]
+            buf_np = np.array(transfer_buf)
+        N_METRICS = 6  # total, reward, policy, value, consistency, grad_norm
+        priorities_np = buf_np[N_METRICS:]
         self.replay_buffer.update_priorities.remote(indices, priorities_np)
 
         if self.train_step_count % self.config.train.checkpoint_interval == 0:
             self._save_checkpoint()
 
-        with self.profiler.time("metrics_convert"):
-            # jax.device_get transfers the whole dict in one batched D2H call
-            # instead of one PCIe round-trip per scalar.
-            metrics = {k: float(v) for k, v in jax.device_get(metrics).items()}
-            metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
+        METRIC_KEYS = ["total_loss", "reward_loss", "policy_loss", "value_loss",
+                       "consistency_loss", "grad_norm"]
+        metrics = dict(zip(METRIC_KEYS, buf_np[:N_METRICS].tolist()))
+        metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
 
         total_loss = metrics["total_loss"]
         grad_norm = metrics["grad_norm"]

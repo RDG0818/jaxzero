@@ -76,7 +76,7 @@ def run_training_loop(
     # Steps per learner call: run the learner for this many steps before
     # returning to the main loop. Higher values reduce Ray round-trip overhead
     # at the cost of coarser-grained metrics reporting.
-    learner_steps_per_call = max(1, config.train.log_interval // 10)
+    learner_steps_per_call = max(1, config.train.log_interval // 5)
     learner_task = learner.run_training_loop.remote(learner_steps_per_call)
     logger.info("Starting main training loop...")
 
