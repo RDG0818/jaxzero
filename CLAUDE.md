@@ -92,9 +92,9 @@ tests/
 ## Architecture
 
 **Training system** (`train/muzero.py` + `actors/` + `training/`): Asynchronous actor-learner pattern using Ray.
-- `LearnerActor` (GPU): runs a self-driving training loop (`run_training_loop(N)`) that executes N steps internally before returning to the main loop. Eliminates Ray round-trip overhead between steps. Prefetches the next batch from the buffer while the GPU trains. EMA update is JIT-compiled to avoid per-leaf kernel launches.
+- `LearnerActor` (GPU): runs a self-driving training loop (`run_training_loop(N)`) that executes N steps internally before returning to the main loop. Eliminates Ray round-trip overhead between steps. Prefetches the next batch from the buffer while the GPU trains. EMA update is JIT-compiled to avoid per-leaf kernel launches. `make_train_step` returns a single packed `transfer_buf = jnp.concatenate([metric_scalars, grad_norm, priorities])` so all GPU→CPU data crosses PCIe in one DMA transaction; `_train_step` slices it after `np.array(transfer_buf)`.
 - `DataActor` (CPU, N instances): runs MCTS episodes, ships `ReplayItem`s to the buffer. Syncs params asynchronously (fires `get_params.remote()` at end of episode, resolves at start of next) so the 300ms transfer overlaps with MCTS compute.
-- `ReplayBufferActor`: wraps `ReplayBuffer` (prioritized experience replay) backed by pre-allocated NumPy arrays.
+- `ReplayBufferActor`: wraps `ReplayBuffer` (prioritized experience replay). Data stored in pre-allocated NumPy arrays; priority sampling uses a cpprb C++ segment tree (O(log n)) — a minimal 1-scalar dummy env_dict acts as a pure priority tree whose ring-buffer pointer stays in lock-step with the NumPy arrays so returned indices map directly. NumPy arrays are kept separately to support `update_targets` (in-place writes), which cpprb doesn't allow.
 - `ReanalyzeActor` (CPU, optional): continuously re-runs MCTS on stored observations with the latest params to generate fresher policy/value targets. Updates only position 0 (root) of each stored sequence. Controlled by `num_reanalyze_actors` and `reanalyze_batch_size` in `TrainConfig`.
 - `training/loop.py`: `run_warmup()` fills the buffer; `run_training_loop()` drives learner, data actors, and reanalyze actors asynchronously via `ray.wait`.
 - `utils/profiler.py`: `Profiler` class used in all actors. Reports mean time per named operation every `debug_interval` steps. JAX note: always call `jax.block_until_ready()` inside a `profiler.time()` block to measure actual GPU/CPU compute, not just async dispatch time.
@@ -150,7 +150,7 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 ### Utils
 
-- **[easy] C++ segment tree for PER** — `ReplayBuffer` recomputes priorities over the entire buffer on every sample (O(n)). Replace with a C++ sum-tree (pybind11) for O(log n) updates and samples. This is the standard approach in Ape-X / R2D2 and directly benefits the async version. Note: Flashbax (JAX-native PER) was evaluated but is not suitable here — it requires arrays to live on GPU throughout, which is incompatible with the Ray multi-process architecture where the buffer must store NumPy arrays.
+- **[done] C++ segment tree for PER** — `ReplayBuffer` now uses cpprb's `PrioritizedReplayBuffer` as a priority tree. O(log n) sampling and priority updates. See design note in Architecture above.
 
 ### Model
 
@@ -180,6 +180,8 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 
 ### Training / Infrastructure
 
-- **[easy] Increase `batch_size`** — current bottleneck is Ray scheduling overhead between learner steps (~30ms gap vs ~28ms GPU compute). Larger batches amortize this overhead by doing more GPU work per step. Try 512 or 1024.
-- **[easy] C++ segment tree for PER** — `ReplayBuffer.sample()` does an O(n) `priorities**alpha / sum` scan every step. At buffer size 100k this is measurable. A sum-tree gives O(log n). Currently hidden by the prefetch but will matter at higher train steps/s.
+- **[easy] Increase `batch_size`** — larger batches amortize Ray scheduling overhead (~100ms/call) by doing more GPU work per step. Try 512 or 1024.
+- **[done] Single D2H transfer** — `make_train_step` packs metrics + priorities into one contiguous JAX array; `_train_step` does one `np.array()` call and slices. Eliminated ~18ms/step of PCIe per-scalar overhead.
+- **[done] C++ segment tree for PER** — see Utils above.
 - **[note] More DataActors** — GPU learner was underutilized due to Ray round-trip overhead (now fixed with self-driving loop) and slow param sync (now async). Adding more actors still helps data throughput but is no longer the primary bottleneck.
+- **[note] Candidate libraries** — `rlax` could replace `utils/transforms.py` entirely (`transform_to_2hot`/`from_2hot` = `scalar_to_support`/`support_to_scalar`; `signed_hyperbolic`/`signed_parabolic` = `muzero_scale`/`inv`) and simplify baseline GAE/PPO. `flashbax` is suitable for a future pure-JAX training path (keeps buffer on GPU). `jaxtyping` + `beartype` for runtime shape checking during development.

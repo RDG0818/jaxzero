@@ -260,6 +260,11 @@ class LearnerActor:
         # Kick off the first prefetch so train() has a batch ready immediately.
         self._prefetch_future = self.replay_buffer.sample.remote(config.train.batch_size)
 
+        # Cache lr at step 0; refreshed every lr_log_interval steps to avoid
+        # per-step JAX dispatch overhead from calling the schedule function.
+        self._cached_lr: float = float(lr_schedule(0))
+        self._lr_log_interval = max(1, config.train.debug_interval)
+
         self.profiler = Profiler("learner", log_interval=config.train.debug_interval)
 
         logger.info(f"(Learner pid={os.getpid()}) Setup complete.")
@@ -280,15 +285,23 @@ class LearnerActor:
             self._prefetch_batch()
             return None
 
-        # Fire the next sample immediately so buffer works in parallel with GPU.
+        # Fire the next buffer sample immediately so it overlaps with GPU compute.
         self._prefetch_batch()
+
+        # Dispatch H2D transfer immediately after getting the batch (JAX async —
+        # returns a future-like DeviceArray; actual DMA runs in background).
+        # This overlaps the 3ms PCIe transfer with rng_split + any other CPU work,
+        # so the GPU sees the batch ready by the time train_step is dispatched.
+        jax_batch = jax.tree_util.tree_map(jax.device_put, batch)
+        jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
 
         with self.profiler.time("rng_split"):
             self.rng_key, train_key = jax.random.split(self.rng_key)
 
         with self.profiler.time("device_put"):
-            jax_batch = jax.tree_util.tree_map(jax.device_put, batch)
-            jax_weights = jax.device_put(np.array(weights, dtype=np.float32))
+            # Ensure the async H2D transfer dispatched above has completed before
+            # train_step consumes the arrays.
+            jax.block_until_ready((jax_batch, jax_weights))
 
         with self.profiler.time("train_step"):
             self.params, self.opt_state, transfer_buf, new_priorities = self.train_step(
@@ -300,14 +313,19 @@ class LearnerActor:
             jax.block_until_ready((self.params, transfer_buf))
         self.train_step_count += 1
 
+        # Dispatch EMA update without blocking — it runs asynchronously on GPU while
+        # the CPU does D2H transfer and bookkeeping. JAX will implicitly wait for
+        # ema_params when it's consumed by the next train_step call.
         with self.profiler.time("ema_update"):
             self.ema_params = self.ema_update(self.ema_params, self.params)
-            jax.block_until_ready(self.ema_params)
 
         with self.profiler.time("d2h_transfer"):
             # Single PCIe DMA: transfer_buf = [total, reward, policy, value,
             # consistency, grad_norm, priority_0, ..., priority_{B-1}]
             buf_np = np.array(transfer_buf)
+        # EMA runs async on GPU; by now (after d2h_transfer ~1.7ms) it is likely
+        # done, but JAX will sync it implicitly when next train_step uses ema_params.
+
         N_METRICS = 6  # total, reward, policy, value, consistency, grad_norm
         priorities_np = buf_np[N_METRICS:]
         self.replay_buffer.update_priorities.remote(indices, priorities_np)
@@ -318,7 +336,11 @@ class LearnerActor:
         METRIC_KEYS = ["total_loss", "reward_loss", "policy_loss", "value_loss",
                        "consistency_loss", "grad_norm"]
         metrics = dict(zip(METRIC_KEYS, buf_np[:N_METRICS].tolist()))
-        metrics["learning_rate"] = float(self.lr_schedule(self.train_step_count))
+
+        # Refresh cached lr every lr_log_interval steps; avoids per-step JAX dispatch.
+        if self.train_step_count % self._lr_log_interval == 0:
+            self._cached_lr = float(self.lr_schedule(self.train_step_count))
+        metrics["learning_rate"] = self._cached_lr
 
         total_loss = metrics["total_loss"]
         grad_norm = metrics["grad_norm"]
