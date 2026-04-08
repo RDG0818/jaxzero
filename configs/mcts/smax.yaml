@@ -1,0 +1,7 @@
+# MCTS settings for SMAX, aligned with MaZero paper.
+# Usage: python train/muzero.py train=smax_3m mcts=smax
+
+defaults:
+  - default
+
+num_simulations: 100   # paper uses 100; default 50 gives noisier policy targets

@@ -1,6 +1,8 @@
 # SMAX 3m scenario: 3 allies vs 3 scripted marine enemies.
 # Usage: python train/muzero.py train=smax_3m
 #
+# Hyperparameters aligned with MaZero paper (SMAC settings).
+#
 # Other common scenarios:
 #   8m:    num_agents=8,  max_episode_steps=120
 #   2s3z:  num_agents=5,  max_episode_steps=150  (2 stalkers + 3 zealots)
@@ -12,3 +14,8 @@ defaults:
 env_name: 3m
 num_agents: 3
 max_episode_steps: 150
+
+# --- MaZero paper SMAC hyperparameters ---
+learning_rate: 1e-4
+n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
+warmup_episodes: 50      # paper: min replay 300 transitions (much lower than default 1000 eps)
