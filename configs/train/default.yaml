@@ -3,7 +3,7 @@ num_agents: 3
 num_episodes: 100000
 warmup_episodes: 1000
 log_interval: 100
-num_actors: 3
+num_actors: 6
 max_episode_steps: 25
 replay_buffer_size: 100000
 replay_buffer_alpha: 0.6

@@ -86,9 +86,12 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 vi_loss = optax.softmax_cross_entropy(out.value_logits, vi_dist)
 
                 B_, N_, D_ = online_proj.shape
+                # epsilon=1e-8 prevents 0/0 NaN when projection vectors have near-zero
+                # norm — common early in training and with SMAX's zeroed dead-agent obs.
                 sim = optax.cosine_similarity(
                     online_proj.reshape(B_ * N_, D_),
                     target_proj.reshape(B_ * N_, D_),
+                    epsilon=1e-8,
                 ).reshape(B_, N_).mean(axis=-1)
                 cons_loss = -sim
 
@@ -345,7 +348,14 @@ class LearnerActor:
         total_loss = metrics["total_loss"]
         grad_norm = metrics["grad_norm"]
         if not np.isfinite(total_loss):
-            logger.warning(f"(Learner) step={self.train_step_count} non-finite total_loss={total_loss:.4f}")
+            # Log each component so we can identify the source.
+            bad = [k for k in METRIC_KEYS if not np.isfinite(metrics[k])]
+            logger.warning(
+                f"(Learner) step={self.train_step_count} non-finite total_loss={total_loss:.4f} "
+                f"| bad components: {bad} "
+                f"| reward={metrics['reward_loss']:.4f} policy={metrics['policy_loss']:.4f} "
+                f"value={metrics['value_loss']:.4f} consistency={metrics['consistency_loss']:.4f}"
+            )
         if not np.isfinite(grad_norm):
             logger.warning(f"(Learner) step={self.train_step_count} non-finite grad_norm={grad_norm:.4f}")
 
