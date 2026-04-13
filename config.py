@@ -35,6 +35,7 @@ class MCTSConfig:
     dirichlet_alpha: float
     dirichlet_fraction: float
     independent_argmax: bool
+    use_root_communication: bool
 
 
 @dataclass(frozen=True)

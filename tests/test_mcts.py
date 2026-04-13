@@ -13,6 +13,7 @@ Module-scoped fixtures compile JAX/JIT once for the whole file to keep
 the total run time reasonable.
 """
 
+import dataclasses
 import pytest
 import jax
 import jax.numpy as jnp
@@ -37,7 +38,41 @@ S   = 10    # support size
 def test_config():
     """Minimal config designed for fast test execution."""
     return ExperimentConfig(
-        train=TrainConfig(num_agents=N, discount_gamma=0.99),
+        train=TrainConfig(
+            env_name="MPE_simple_spread_v3",
+            num_agents=N,
+            num_episodes=100,
+            warmup_episodes=10,
+            log_interval=10,
+            num_actors=1,
+            max_episode_steps=25,
+            replay_buffer_size=1000,
+            replay_buffer_alpha=0.6,
+            replay_buffer_beta_start=0.4,
+            replay_buffer_beta_frames=1000,
+            batch_size=16,
+            learning_rate=1e-3,
+            param_update_interval=1,
+            end_lr_factor=0.1,
+            lr_warmup_steps=100,
+            value_scale=0.25,
+            consistency_scale=2.0,
+            gradient_clip_norm=5.0,
+            unroll_steps=5,
+            n_step=10,
+            discount_gamma=0.99,
+            wandb_mode="disabled",
+            project_name="test",
+            checkpoint_dir="checkpoints",
+            checkpoint_interval=100,
+            num_envs_per_actor=1,
+            sync=True,
+            ema_decay=0.999,
+            num_reanalyze_actors=0,
+            reanalyze_batch_size=32,
+            debug=False,
+            debug_interval=100,
+        ),
         model=ModelConfig(
             hidden_state_size=D,
             value_support_size=S,
@@ -57,12 +92,14 @@ def test_config():
             pred_out=16,
         ),
         mcts=MCTSConfig(
+            planner_mode="independent",
             num_simulations=8,           # minimum viable for gumbel (>= num_gumbel_samples)
             max_depth_gumbel_search=3,
             num_gumbel_samples=4,
             dirichlet_alpha=0.3,
             dirichlet_fraction=0.25,
             independent_argmax=True,
+            use_root_communication=False,
         ),
     )
 
@@ -174,7 +211,7 @@ class TestMCTSIndependentPlanner:
         """N=1 edge case: one agent searching over its own actions."""
         net, _ = model_and_params
         cfg = ExperimentConfig(
-            train=TrainConfig(num_agents=1, discount_gamma=0.99),
+            train=dataclasses.replace(test_config.train, num_agents=1),
             model=test_config.model,
             mcts=test_config.mcts,
         )
@@ -355,7 +392,7 @@ class TestMCTSJointPlanner:
         """N=1: joint action space is just A, no combinatorics needed."""
         net, _ = model_and_params
         cfg = ExperimentConfig(
-            train=TrainConfig(num_agents=1, discount_gamma=0.99),
+            train=dataclasses.replace(test_config.train, num_agents=1),
             model=test_config.model,
             mcts=test_config.mcts,
         )

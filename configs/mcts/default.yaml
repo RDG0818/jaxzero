@@ -5,3 +5,4 @@ num_gumbel_samples: 10
 dirichlet_alpha: 0.3
 dirichlet_fraction: 0.25
 independent_argmax: true
+use_root_communication: false

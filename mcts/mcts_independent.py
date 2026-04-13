@@ -25,6 +25,7 @@ class MCTSIndependentPlanner(MCTSPlanner):
     def __init__(self, model: FlaxMAMuZeroNet, config: ExperimentConfig):
         super().__init__(model, config)
         self.independent_argmax = config.mcts.independent_argmax
+        self.use_root_communication = config.mcts.use_root_communication
 
     def _recurrent_fn(
         self,
@@ -99,6 +100,14 @@ class MCTSIndependentPlanner(MCTSPlanner):
         root_latent = model_output.hidden_state          # (B, N, D)
         root_logits = model_output.policy_logits         # (B, N, A)
         root_value = utils.support_to_scalar(model_output.value_logits, self.value_support)
+
+        # Communication pass: agents attend to each other's root latent before
+        # committing to independent searches. Each agent's search then starts from
+        # an embedding that has already "heard" the other agents' policy state.
+        if self.use_root_communication:
+            root_latent = self.model.apply(
+                {"params": params}, root_latent, method=self.model.communicate
+            )
 
         # One rng key and index per agent, scanned in order.
         keys = jax.random.split(rng_key, self.num_agents)       # (N, 2)

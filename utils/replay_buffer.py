@@ -1,4 +1,4 @@
-# replay_buffer.py
+# utils/replay_buffer.py
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -78,18 +78,33 @@ tree_util.register_pytree_node(
 )
 
 
+# ---------------------------------------------------------------------------
+# C++ backend detection (one-time import at module load).
+# Falls back silently to the pure-Python implementation if unavailable.
+# ---------------------------------------------------------------------------
+def _try_import_cpp():
+    try:
+        import _replay_buffer_cpp as _cpp
+        return _cpp.ReplayBuffer, _cpp.ReplayBufferConfig
+    except ImportError:
+        return None, None
+
+_CppReplayBuffer, _CppConfig = _try_import_cpp()
+
+
+# ---------------------------------------------------------------------------
+# ReplayBuffer — thin shim that delegates to C++ when available.
+# ---------------------------------------------------------------------------
 class ReplayBuffer:
     """
     Prioritized experience replay.
 
-    Data lives in pre-allocated NumPy arrays for O(1) indexed writes and
-    in-place target updates (used by ReanalyzeActor). Priority sampling uses
-    a cpprb C++ segment tree for O(log n) weighted sampling and priority
-    updates instead of the O(n) NumPy softmax approach.
+    Uses the C++ backend (_replay_buffer_cpp) when available:
+      - Lock-free ring buffer + sum tree (std::atomic)
+      - CUDA pinned output buffers for fast jax.device_put() transfers
 
-    A tiny parallel cpprb buffer (1-scalar env_dict) acts as a pure priority
-    tree — its ring-buffer pointer stays in lock-step with ours so the indices
-    it returns directly index into the NumPy arrays.
+    Falls back to the pure-Python implementation otherwise.  The public API
+    is identical in both cases.
     """
 
     def __init__(
@@ -101,15 +116,30 @@ class ReplayBuffer:
         unroll_steps: int,
         alpha: float,
         beta_start: float,
-        beta_frames: int,
+        beta_frames: float,
     ):
+        self._use_cpp = _CppReplayBuffer is not None
+        if self._use_cpp:
+            cfg = _CppConfig()
+            cfg.capacity          = capacity
+            cfg.obs_size          = int(np.prod(observation_shape))
+            cfg.action_space_size = action_space_size
+            cfg.num_agents        = num_agents
+            cfg.unroll_steps      = unroll_steps
+            cfg.alpha             = float(alpha)
+            cfg.beta_start        = float(beta_start)
+            cfg.beta_frames       = int(beta_frames)
+            self._buf = _CppReplayBuffer(cfg)
+            return
+
+        # ---- Pure-Python fallback ----------------------------------------
         from cpprb import PrioritizedReplayBuffer as _PRB
 
-        self.capacity = capacity
-        self.alpha = alpha
-        self.beta_start = beta_start
-        self.beta_frames = beta_frames
-        self.frame_count = 0
+        self.capacity     = capacity
+        self.alpha        = alpha
+        self.beta_start   = beta_start
+        self.beta_frames  = beta_frames
+        self.frame_count  = 0
 
         self.observations    = np.zeros((capacity, num_agents, *observation_shape), dtype=np.float32)
         self.actions         = np.zeros((capacity, unroll_steps, num_agents),       dtype=np.int32)
@@ -117,12 +147,8 @@ class ReplayBuffer:
         self.value_targets   = np.zeros((capacity, unroll_steps + 1, num_agents),   dtype=np.float32)
         self.reward_targets  = np.zeros((capacity, unroll_steps, num_agents),        dtype=np.float32)
         self.agent_orders    = np.zeros((capacity, num_agents),                      dtype=np.int32)
-        # Small priorities array kept only for get_stats(); not used for sampling.
         self._priorities_log = np.zeros(capacity, dtype=np.float32)
 
-        # cpprb priority tree — 1-scalar dummy payload to minimise per-add overhead.
-        # Its ring-buffer uses the same capacity so returned indices map 1-to-1 onto
-        # the NumPy arrays above.
         self._ptree = _PRB(
             capacity,
             env_dict={"_": {"shape": 1, "dtype": np.float32}},
@@ -132,18 +158,32 @@ class ReplayBuffer:
         self.pointer = 0
         self.size    = 0
 
+    # ------------------------------------------------------------------
+    # add()
+    # ------------------------------------------------------------------
     def add(self, item: ReplayItem, priority: float):
-        """Adds a ReplayItem, overwriting the oldest entry when full."""
+        if self._use_cpp:
+            self._buf.add(
+                np.asarray(item.observation,   dtype=np.float32),
+                np.asarray(item.actions,       dtype=np.int32),
+                np.asarray(item.policy_target, dtype=np.float32),
+                np.asarray(item.value_target,  dtype=np.float32),
+                np.asarray(item.reward_target, dtype=np.float32),
+                np.asarray(item.agent_order,   dtype=np.int32),
+                float(priority),
+            )
+            return
+
         priority = float(priority) if priority > 0 else (
             self._priorities_log[:self.size].max() if self.size > 0 else 1.0
         )
         idx = self.pointer
-        self.observations[idx]   = item.observation
-        self.actions[idx]        = item.actions
-        self.policy_targets[idx] = item.policy_target
-        self.value_targets[idx]  = item.value_target
-        self.reward_targets[idx] = item.reward_target
-        self.agent_orders[idx]   = item.agent_order
+        self.observations[idx]    = item.observation
+        self.actions[idx]         = item.actions
+        self.policy_targets[idx]  = item.policy_target
+        self.value_targets[idx]   = item.value_target
+        self.reward_targets[idx]  = item.reward_target
+        self.agent_orders[idx]    = item.agent_order
         self._priorities_log[idx] = priority
 
         self._ptree.add(**{"_": np.zeros((1, 1), dtype=np.float32)},
@@ -152,11 +192,25 @@ class ReplayBuffer:
         self.pointer = (self.pointer + 1) % self.capacity
         self.size    = min(self.size + 1, self.capacity)
 
+    # ------------------------------------------------------------------
+    # sample()
+    # ------------------------------------------------------------------
     def sample(self, batch_size: int) -> Tuple[ReplayItem, np.ndarray, np.ndarray]:
-        """
-        Samples a batch with prioritized experience replay.
-        Returns (batch, importance_weights, indices) or (None, None, None).
-        """
+        if self._use_cpp:
+            result = self._buf.sample(batch_size)
+            if result is None:
+                return None, None, None
+            fields, weights, indices = result
+            batch = ReplayItem(
+                observation   = fields["observation"],
+                actions       = fields["actions"],
+                policy_target = fields["policy_target"],
+                value_target  = fields["value_target"],
+                reward_target = fields["reward_target"],
+                agent_order   = fields["agent_order"],
+            )
+            return batch, weights, indices
+
         if self.size == 0:
             return None, None, None
 
@@ -177,30 +231,58 @@ class ReplayBuffer:
         )
         return batch, weights, indices
 
+    # ------------------------------------------------------------------
+    # sample_for_reanalysis()
+    # ------------------------------------------------------------------
     def sample_for_reanalysis(self, batch_size: int):
-        """Uniformly samples indices and returns observations for MCTS re-planning.
-        Returns (None, None, None) if buffer is empty."""
+        if self._use_cpp:
+            result = self._buf.sample_for_reanalysis(batch_size)
+            if result is None:
+                return None, None, None
+            indices, observations, agent_orders = result
+            return indices, observations, agent_orders
+
         if self.size == 0:
             return None, None, None
         indices = np.random.choice(self.size, min(batch_size, self.size), replace=False)
         return indices, self.observations[indices].copy(), self.agent_orders[indices].copy()
 
+    # ------------------------------------------------------------------
+    # update_targets()
+    # ------------------------------------------------------------------
     def update_targets(self, indices: np.ndarray, policy_targets: np.ndarray, root_values: np.ndarray):
-        """Updates policy and value targets at unroll position 0 for the given indices.
+        if self._use_cpp:
+            self._buf.update_targets(
+                np.asarray(indices,        dtype=np.int64),
+                np.asarray(policy_targets, dtype=np.float32),
+                np.asarray(root_values,    dtype=np.float32),
+            )
+            return
 
-        Args:
-            indices:        Buffer indices to update.
-            policy_targets: (B, N, A) — new MCTS-improved policy at root.
-            root_values:    (B,)     — new scalar root value estimate.
-        """
         self.policy_targets[indices, 0] = policy_targets
-        self.value_targets[indices, 0] = root_values[:, None]  # broadcast (B,) → (B, N)
+        self.value_targets[indices, 0]  = root_values[:, None]
 
+    # ------------------------------------------------------------------
+    # update_priorities()
+    # ------------------------------------------------------------------
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
+        if self._use_cpp:
+            self._buf.update_priorities(
+                np.asarray(indices,    dtype=np.int64),
+                np.asarray(priorities, dtype=np.float32),
+            )
+            return
+
         self._priorities_log[indices] = priorities
         self._ptree.update_priorities(indices, priorities)
 
+    # ------------------------------------------------------------------
+    # get_stats()
+    # ------------------------------------------------------------------
     def get_stats(self) -> dict:
+        if self._use_cpp:
+            return dict(self._buf.get_stats())
+
         if self.size == 0:
             return {"size": 0, "capacity": self.capacity, "fill_pct": 0.0}
         active = self._priorities_log[:self.size]
@@ -217,11 +299,13 @@ class ReplayBuffer:
         }
 
     def __len__(self):
+        if self._use_cpp:
+            return len(self._buf)
         return self.size
 
 
 # ---------------------------------------------------------------------------
-# Episode processing
+# Episode processing  (pure Python / NumPy — unchanged)
 # ---------------------------------------------------------------------------
 
 def process_episode(
