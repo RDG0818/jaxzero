@@ -57,7 +57,26 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
     rng = jax.random.PRNGKey(0)
     params = model.init(rng, dummy_obs)["params"]
 
-    target = {"params": params, "step": np.array(0)}
+    import optax
+    lr = config.train.learning_rate
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=lr,
+        warmup_steps=config.train.lr_warmup_steps,
+        decay_steps=config.train.num_episodes - config.train.lr_warmup_steps,
+        end_value=lr * config.train.end_lr_factor,
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(config.train.gradient_clip_norm),
+        optax.adamw(learning_rate=lr_schedule),
+    )
+    opt_state = optimizer.init(params)
+    target = {
+        "params": params,
+        "ema_params": params,
+        "opt_state": opt_state,
+        "step": np.array(0),
+    }
     restored = ckpt_manager.restore(latest, args=ocp.args.StandardRestore(target))
     params = restored["params"]
     step = int(restored["step"])
