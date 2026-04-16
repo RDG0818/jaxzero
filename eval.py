@@ -47,7 +47,10 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
 
     # Load checkpoint.
     ckpt_dir = Path(config.train.checkpoint_dir).absolute()
-    ckpt_manager = ocp.CheckpointManager(ckpt_dir)
+    ckpt_manager = ocp.CheckpointManager(
+        ckpt_dir,
+        options=ocp.CheckpointManagerOptions(enable_async_checkpointing=False),
+    )
     latest = ckpt_manager.latest_step()
     if latest is None:
         raise FileNotFoundError(f"No checkpoint found in {ckpt_dir}")
