@@ -68,7 +68,9 @@ class DataActor:
 
         # Single JIT boundary: DataActor owns compilation of the plan function.
         self.plan_fn = jax.jit(planner.plan)
-        self.params = ray.get(learner_actor.get_params.remote())
+        result = ray.get(learner_actor.get_params.remote())
+        self.params = result["params"]
+        self.norm_state = result["norm_state"]  # None when use_obs_normalization=false
         self._param_future = None  # in-flight async param fetch, if any
         self.profiler = Profiler(f"data_actor[{actor_id}]", log_interval=config.train.debug_interval)
         logger.info(f"(DataActor {actor_id} pid={os.getpid()}) Setup complete.")
@@ -100,9 +102,20 @@ class DataActor:
             self.rng_key, plan_key, step_key = jax.random.split(self.rng_key, 3)
 
             with self.profiler.time("plan"):
+                # Normalize observations if running norm is enabled.
+                # Applied on CPU (numpy) before JIT boundary so normalization
+                # doesn't affect the JAX trace or add a device round-trip.
+                if self.norm_state is not None:
+                    obs_np = np.array(observations)
+                    obs_norm = (obs_np - self.norm_state["mean"]) / np.sqrt(
+                        self.norm_state["var"] + 1e-5
+                    )
+                    plan_obs = jnp.array(obs_norm)
+                else:
+                    plan_obs = observations
                 # block_until_ready ensures we measure actual MCTS compute, not
                 # just async dispatch time (JAX on CPU is also async).
-                plan_output = self.plan_fn(self.params, plan_key, observations)
+                plan_output = self.plan_fn(self.params, plan_key, plan_obs)
                 jax.block_until_ready(plan_output.policy_targets)
 
             with self.profiler.time("device_get"):
@@ -171,7 +184,9 @@ class DataActor:
             if self._param_future is not None:
                 ready, _ = ray.wait([self._param_future], timeout=0)
                 if ready:
-                    self.params = ray.get(self._param_future)
+                    result = ray.get(self._param_future)
+                    self.params = result["params"]
+                    self.norm_state = result["norm_state"]
                     self._param_future = None
                     self.episodes_since_update = 0
 

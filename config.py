@@ -23,6 +23,7 @@ class ModelConfig:
     proj_out: int
     pred_hid: int
     pred_out: int
+    use_obs_normalization: bool
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class TrainConfig:
     lr_warmup_steps: int
     value_scale: float
     consistency_scale: float
+    consistency_horizon: int
     gradient_clip_norm: float
     unroll_steps: int
     n_step: int

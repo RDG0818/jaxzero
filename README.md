@@ -1,228 +1,313 @@
-# Sequential MuZero Research Project
-Multi-agent MuZero-style world-model in JAX/FLAX for research and prototyping. Developed originally for the Tactical Behaviors for Autonomous Maneuver (TBAM) project in collaboration with Mississippi State University, Rutgers University, and the Army Research Lab. For more information, contact: rdg291@msstate.edu.
+# Sequential MuZero
+
+Multi-agent MuZero-style world-model in JAX/Flax for research and prototyping. Developed originally for the Tactical Behaviors for Autonomous Maneuver (TBAM) project in collaboration with Mississippi State University, Rutgers University, and the Army Research Lab.
+
+Contact: rdg291@msstate.edu
 
 ## Table of Contents
 
 1. [Overview](#overview)
 2. [Features](#features)
 3. [Installation](#installation)
-4. [Project Structure and Implementation Notes](#project-structure-and-implementation-notes)
-5. [Research Directions & Future Ideas](#research-directions--future-ideas)
-6. [TODO & Must-Implement Features](#todo--must-implement-features)
+4. [Project Structure](#project-structure)
+5. [Configuration](#configuration)
+6. [Research Directions & Future Ideas](#research-directions--future-ideas)
 7. [What Didn't Work](#what-didnt-work)
 8. [Relevant Papers](#relevant-papers)
 9. [License](#license)
 
+---
+
 ## Overview
-This project is a model-based multi-agent reinforcement learning framework built on JAX/FLAX. It extends MuZero-style planning (MCTS + learned world-model) to multi-agent environments.
 
-The motivation behind this project was to explore more efficient ways to search over the exponential action space in multi-agent environments, such as sequential MCTS where each agent searches over its own action space and shares search statistics between each tree. This project also serves as a clean, fast, and modular codebase to test new ideas and extensions of MuZero in multi-agent environments.
+This project is a model-based multi-agent reinforcement learning framework built on JAX/Flax. It extends MuZero-style planning (MCTS + learned world model) to cooperative multi-agent environments.
 
-## Features
-
-- Uses **[JAX](https://github.com/google/jax)** for fast, composable function transformations (JIT, grad, vmap, pmap) and XLA-accelerated computation.  
-
-- Uses **[Flax](https://github.com/google/flax)** as a modular, flexible neural network library for JAX.
-
-- **World-model**
-    - The representation network encodes observations into a latent hidden state.
-    - The dynamics network takes in a latent state and actions, and outputs the next (imagined) latent state.
-    - The prediction network takes in a latent state and outputs the policy (action distribution) and value (long term reward).
-    - The projection network encourages latent state temporal consistency and stabilizes training.
-    - The transformer-style attention mechanism enables message passing for agent communication and more informed latent states.
-    - The scalar to categorical distribution transforms for reward and value network improves training stability and reduces variance.
-
-- **Planning**
-    - **[MCTX](https://github.com/google-deepmind/mctx)** is a fast, JAX-native MuZero-style Monte Carlo Tree Search (MCTS) implementation developed by DeepMind. Enables differentiable, batched search with support for both standard and Gumbel MuZero variants. Used in all the following planning variants.
-    - Dirichelet noise is added to the root state of each search to encourage exploration. 
-    - In independent MCTS, each agent performs its own search independently and assumes other agents do the argmax of their policy network, inspired by adaptations of MuZero to multi-agent settings.
-    - In sequential MCTS (WIP), each agent performs its own search conditioned on the results/statistics/actions of the previous agents that have planned.
-    - In joint sampled MCTS, a single search tree explores joint actions across all agents, with sampling to improve scalability and efficiency for the exponential action space.
-
-
-- **Training**
-    - Uses an asynchronous actor-learner framework with Ray, inspired by EfficientZero. Uses a centralized GPU-based learner and multiple CPU-based data actors running in parallel. Actors collect experience independently and send data to a replay buffer, which is sampled to be used for the learner. The data actors are periodically updated with new parameters from the learner. 
-    - A Prioritized Experience Replay is used to sample from the buffer with probabilities proportional to their TD error, which accelerates convergence.
-    - Uses the AdamW optimizer with a learning rate scheduler, gradient clipping, and optional loss scaling to ensure stable training in deep latent models. These mechanisms mitigate exploding gradients, vanishing updates, and help tune across diverse environments.
-    - The model is trained over `k` unroll steps through its dynamics network, learning to simulate forward in latent space. Targets for value prediction use `n`-step returns to improve learning signal and credit assignment.
-- **Utilities**
-    - Compatible with [jaxMARL](https://github.com/flairox/jaxmarl), a modular framework for multi-agent RL environments in JAX. 
-    - All key metrics — rewards, losses, gradients, learning rates, and planning statistics — are tracked and visualized in real time via Weights & Biases integration.
-
-## Installation
-You can run this project either locally or using the provided Docker setup, which is recommended for consistent environments and GPU support (e.g. on AWS).
-
-### Local Installation
-
-**1. Clone the repository**
-```bash
-git clone https://github.com/RDG0818/sequential-muzero
-cd sequential-muzero
-```
-
-**2. Create Conda environment**
-```bash
-conda create -n muzero python=3.10.18
-conda activate muzero
-```
-
-**3. Install dependencies, setup logging, and quickstart**
-```bash
-pip install -r requirements.txt
-wandb login
-python train.py
-```
-
-### Docker
-Full containerized training environment, tested on AWS g4dn.8xlarge EC2 instance with Nvidia GPUs. Note that NVIDIA Container Toolkit is required.
-
-```bash
-docker build -t muzero_clone .
-docker run --gpus all --shm-size=32bg -it --rm muzero_clone
-python3 train.py
-```
-
-## Project Structure and Implementation Notes
-
-- `train.py` - defines the replay buffer, learner, and data actors as well as the training loop.
-- `config.py` - defines the major hyperparameters used in the entire project
-- `model/model.py` - defines the representation, dynamics, prediction, and projection networks and the `FlaxMAMuZeroNet` API
-- `mcts/` - folder that contains files defining the abstract base class for the MCTS planners and the logic for the independent, sequential, and joint variations.
-- `utils/replay_buffer.py` - defines the replay buffer and prioritized experience replay logic
-- `utils/mpe_env_wrapper.py` - defines the environment wrapper for the MPE environments
-- `utils/utils.py` - defines the categorical transforms for the reward and value as well as other useful functions
-
-### For the Next Developer
-This project includes several implementation-specific considerations that are important for stability and extensibility, especially due to JAX and Ray incompatibilites. Most critically, JAX eagerly allocates the entire GPU, and Ray spawns multiple processes, which can lead to segmentation faults or silent errors if JAX objects are misused across actor boundaries. To avoid this:
-
-- Always import JAX modules *inside* each Ray actor.
-- Never create or hold any JAX-related objects in the global scope of a Ray-managed process.
-- The replay buffer converts everything to NumPy arrays before storage to prevent accidentally capturing JAX traces or DeviceArrays across processes. 
-
-Violating these constraints often leads to `SEGFAULT` or driver-related crashes during execution. There are also driver issues that can happen during installation. Utilizing the docker installation is recommended to avoid these issues.
-
- >  If you're running into strange errors or debugging Ray+JAX interaction, feel free to reach out: rdg291@msstate.edu
-
-## Research Directions and Future Ideas
-
-The core research idea for this codebase is to reduce the exponential action space size of joint MCTS. 
+The core research question is how to efficiently search over the exponential joint action space in multi-agent environments. The primary direction explored here is **sequential MCTS**, where each agent searches over its own individual action space and conditions on the plans of prior agents. This reduces planning complexity from exponential to linear in the number of agents while preserving coordination signals.
 
 ---
 
-### Key Idea
-Instead of running a full joint MCTS over the joint action space $A^N$, we decompose the planning process into $N$ individual searches, each over an individual agent's action space $A$. This reduces the planning complexity from exponential to linear in the number of agents. This is implemented in `mcts/mcts_independent.py`. However, this approach does not encourage any form of coordination between the agents, and effectively makes each agent individually greedy. To address this, we take inspiration from [this paper](https://arxiv.org/pdf/2304.09870), specifically the Multi-Agent Decomposition Lemma. In this case, instead of conditioning on advantages, we condition on prior agents' searches. This introduces a form of coordination between the agents while still avoiding an exponential action space. The basic structure of this idea is implemented in `mcts/mcts_sequential.py`.
+## Features
 
-However, this approach introduces several research questions: 
-- What information should be passed between the searches?
-- What does it mean to "condition" a search?
-- How should the information affect the search? 
-- How can we do this without breaking Centralized Training, Decentralized Execution (CTDE)?
+### World Model (`model/`)
 
-From several experimental dead ends (see *What Didn’t Work*), here is a distilled approach that seems most logical so far:
+- **Representation network**: encodes per-agent observations `(B, N, obs_dim)` into latent states `(B, N, D)`.
+- **Dynamics network**: takes a latent state and joint actions, returns the next imagined latent state and reward logits. Optionally prepends a `TransformerAttentionEncoder` for inter-agent communication in latent space.
+- **Prediction network**: maps a latent state to per-agent policy logits `(B, N, A)` and a centralized value estimate.
+- **Projection network**: BYOL-style temporal consistency head. Online branch applies projection + prediction MLP; target branch uses a slowly-moving EMA copy of the parameters (`ema_decay=0.999`), updated outside the JIT boundary.
+- **Categorical reward/value**: scalar targets are encoded as distributions over a discrete support (tz-transform) for improved training stability. See `utils/transforms.py`.
+- **Communication before commitment** (`use_root_communication`): an optional cross-agent attention pass applied to root latent states *before* independent MCTS searches begin. Lets agents broadcast their current hidden state to all other agents, enabling each agent to condition its search on a summary of the global state — without requiring inter-search communication or breaking CTDE.
 
-- Sequential Plan Propagation: There must be a mechanism (e.g., GRU, Transformer) to create and pass a stateful representation of the team plan between each agent's planning stage.
+### MCTS Planners (`mcts/`)
 
-- Plan Integration: The team plan must be used to conditionally modify one of the core components of the search process: the policy (action selection), the value (search guidance), or the state representation. This can occur in either the macro level (between searches at the root, `_plan_loop`) or the micro level (inside the searches, `recurrent_fn`).
+All planners use [`mctx.gumbel_muzero_policy`](https://github.com/google-deepmind/mctx) — DeepMind's JAX-native Gumbel MuZero MCTS.
 
-- The networks must work the same at the macro and micro levels to avoid diluting gradients. Having major differences in root level decision vs. search decisions will be less effective then even the most simple independent MCTS.
+- **`MCTSIndependentPlanner`**: one Gumbel MuZero search per agent via `jax.lax.scan`. Other agents are fixed to their policy argmax during each agent's search. Supports `use_root_communication` to run a cross-agent attention pass before the searches.
+- **`MCTSJointPlanner`**: single search over the combinatorial joint action space `A^N` with independence-factored logits. Marginal policy targets extracted by summing over other agents' axes. Scales poorly with N but provides a strong coordination baseline.
+- Dirichlet noise is added to the root of each search to encourage exploration.
 
-Here is a non-exhaustive list of future ideas, which may or may not work:
-- Replacing the policy MLP network with an RNN based network (GRU, LSTM, transformer)
-- Incorporating Dreamv3 style dynamics for improved sample efficiency
-- Some form of value decomposition, such as QMIX
-- some form of search optimism as discussed in the [MAZero paper](https://openreview.net/pdf?id=CpnKq3UJwp) (note that this is very demanding on implementation and requires significant modification the MCTX high level functions)
+### Training Infrastructure (`actors/`, `training/`)
 
-## TODO and Must-Implement Features
+Asynchronous actor-learner architecture using [Ray](https://www.ray.io), inspired by EfficientZero.
 
-There are several TODOs listed throughout the codebase. If you are new to this codebase, I would suggest working on this first, as this will make later development significantly easier. Here is a non-exhaustive list of necessary features:
+- **`LearnerActor`** (GPU): self-driving training loop — runs N steps internally per Ray call to amortize scheduling overhead (~100ms/call). Prefetches the next batch while the GPU trains. EMA update is JIT-compiled. All GPU→CPU metrics and priorities are packed into a single `jnp.concatenate` and transferred in one DMA transaction.
+- **`DataActor`** (CPU, multiple instances): runs MCTS episodes, ships `ReplayItem`s to the replay buffer. Parameter syncs are asynchronous: `get_params.remote()` is fired at end of episode and resolved at the start of the next, so the ~300ms transfer overlaps with MCTS compute.
+- **`ReplayBufferActor`**: wraps `ReplayBuffer` with prioritized experience replay (PER). Uses a hand-written C++ backend when built (see below), falling back to a pure-Python implementation if the `.so` is not present.
+- **`ReanalyzeActor`** (CPU, optional): continuously re-runs MCTS on stored observations with the latest parameters to generate fresher policy/value targets. Writes only to position 0 (root) of each stored sequence.
 
-- model saving logic/testing script 
-- visualizations of the agent in the environment
-- reanalyze actors to avoid stale data in the replay buffer
-- environment wrapper abstract base class (this exists in the synch branch, so you could use that one)
-- SMAC environment wrapper
-- minor optimizations/stylistic choices through out the codebase
-- unit testing for all files in the repo (**highly suggested**)
+### C++ Replay Buffer (`csrc/replay_buffer/`)
+
+A hand-written, lock-free prioritized replay buffer with pybind11 Python bindings.
+
+- **Lock-free ring buffer + sum tree**: `std::atomic<int64_t>` write pointer; sum tree nodes stored as `std::atomic<uint32_t>` reinterpreted as IEEE-754 floats via `std::bit_cast`. Delta propagation uses a CAS loop for float-safe atomic addition. All atomics use `memory_order_relaxed` — sufficient for the single Ray actor (SPSC) use case.
+- **CUDA pinned output buffers**: `sample()` and `sample_for_reanalysis()` gather directly into `cudaMallocHost` memory (falls back to `calloc` without CUDA). This eliminates the pageable→pinned intermediate copy that `jax.device_put()` would otherwise incur — saving ~50–200 µs per training step at 200KB batch size.
+- **Stratified PER sampling**: divides the priority sum into B equal segments and draws one sample per segment using an xorshift64 PRNG. Reduces variance compared to naive importance sampling.
+- **Vitter's Algorithm R**: `sample_for_reanalysis()` uses reservoir sampling for uniform selection without replacement in O(n) time with no extra allocation.
+- **Pure-Python fallback**: if the `.so` is not built, `utils/replay_buffer.py` falls back to `cpprb` + NumPy arrays automatically. The public API is identical.
+
+### Baselines (`baselines/`)
+
+IPPO and MAPPO implemented in pure JAX (no Ray):
+- Parameter sharing across agents; agent one-hot ID appended to observations.
+- Vectorized rollout via `jax.lax.scan` over T timesteps × B parallel environments.
+- **MAPPO centralized critic**: global state = concatenation of all agent observations `(B, N*obs_size)`.
+
+---
+
+## Installation
+
+### Local
+
+```bash
+git clone https://github.com/RDG0818/sequential-muzero
+cd sequential-muzero
+
+conda create -n mazero python=3.10.18
+conda activate mazero
+
+pip install -r requirements.txt
+wandb login  # optional; set wandb_mode: "online" in configs/train/default.yaml to enable
+
+# Build the C++ replay buffer (run once after cloning, or after modifying csrc/)
+pip install pybind11
+python setup.py build_ext --inplace
+python -c "import _replay_buffer_cpp; print('C++ backend loaded')"
+```
+
+### Docker
+
+Tested on AWS `g4dn.8xlarge` with NVIDIA Container Toolkit.
+
+```bash
+docker build -t muzero .
+docker run --gpus all --shm-size=32g -it --rm muzero
+python train/muzero.py
+```
+
+### Running
+
+```bash
+# MuZero (default config)
+python train/muzero.py
+
+# Switch MCTS planner
+python train/muzero.py mcts=joint
+
+# Override hyperparameters
+python train/muzero.py train.num_episodes=50000 train.batch_size=256
+
+# Enable root communication
+python train/muzero.py mcts.use_root_communication=true
+
+# Baselines
+python train/ippo.py
+python train/mappo.py
+
+# Evaluation
+python eval.py
+python eval.py eval_episodes=200 train.checkpoint_dir=checkpoints
+
+# Tests
+pytest tests/ -v
+```
+
+---
+
+## Project Structure
+
+```
+csrc/
+  replay_buffer/
+    sum_tree.h            # lock-free atomic sum tree (header-only)
+    pinned_alloc.h        # cudaMallocHost / calloc fallback (header-only)
+    replay_buffer.h/.cpp  # ReplayBuffer C++ class
+    bindings.cpp          # pybind11 module (_replay_buffer_cpp)
+CMakeLists.txt            # builds _replay_buffer_cpp.*.so; CUDA optional
+setup.py                  # python setup.py build_ext --inplace
+train/
+  muzero.py               # entry point: builds ExperimentConfig, launches Ray actors
+  ippo.py                 # IPPO baseline (pure JAX, no Ray)
+  mappo.py                # MAPPO baseline (pure JAX, no Ray)
+eval.py                   # loads checkpoint, runs N MCTS episodes, logs return
+config.py                 # ModelConfig, MCTSConfig, TrainConfig, ExperimentConfig dataclasses
+configs/
+  config.yaml             # root defaults
+  model/default.yaml      # model architecture hyperparameters
+  mcts/default.yaml       # MCTS hyperparameters (independent planner)
+  mcts/joint.yaml         # joint planner preset
+  train/default.yaml      # training hyperparameters
+  baseline/               # IPPO / MAPPO hyperparameters
+actors/
+  learner_actor.py        # LearnerActor (GPU)
+  data_actor.py           # DataActor (CPU)
+  reanalyze_actor.py      # ReanalyzeActor (CPU)
+  replay_buffer_actor.py  # ReplayBufferActor (wraps ReplayBuffer)
+training/
+  loop.py                 # run_warmup(), run_training_loop()
+model/
+  model.py                # FlaxMAMuZeroNet and sub-networks
+  attention.py            # TransformerAttentionEncoder
+  layers.py               # MLP
+mcts/
+  base.py                 # MCTSPlanner base class, MCTSPlanOutput
+  mcts_independent.py     # MCTSIndependentPlanner (+ optional root communication)
+  mcts_joint.py           # MCTSJointPlanner
+envs/
+  mpe_env_wrapper.py      # MPEEnvWrapper + VecMPEEnvWrapper (JaxMARL MPE)
+  smax_env_wrapper.py     # SMAC environment wrapper
+baselines/
+  networks.py             # ActorCritic + CentralizedCritic Flax modules
+  ippo.py                 # IPPO: GAE + PPO clip
+  mappo.py                # MAPPO: GAE + PPO clip + centralized critic
+utils/
+  transforms.py           # DiscreteSupport, scalar_to_support, support_to_scalar, muzero_scale/inv
+  replay_buffer.py        # ReplayBuffer, ReplayItem, Episode, Transition, process_episode
+  logging_utils.py        # logger singleton
+tests/
+  test_model.py
+  test_mcts.py
+  test_replay_buffer.py   # 20 tests: shapes, dtypes, PER sampling, update_targets, reanalysis
+```
+
+### For the Next Developer
+
+JAX eagerly allocates the entire GPU, and Ray spawns isolated processes. This combination requires discipline:
+
+- **All JAX imports must be inside Ray actor methods / `__init__`**, never at module top-level in actor files.
+- **No JAX objects in global scope** of any Ray-managed process.
+- The replay buffer converts everything to NumPy before storage to prevent `DeviceArray`s crossing process boundaries.
+
+Violating these rules causes SEGFAULTs or silent failures that are hard to debug. If you hit strange Ray+JAX errors, reach out: rdg291@msstate.edu
+
+---
+
+## Configuration
+
+All hyperparameters live in `configs/`. Pass overrides on the command line — no code changes needed.
+
+Key settings in `configs/mcts/default.yaml`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `planner_mode` | `independent` | `independent` or `joint` |
+| `num_simulations` | `50` | MCTS simulations per agent per step |
+| `num_gumbel_samples` | `8` | Actions considered at root (temperature proxy) |
+| `use_root_communication` | `false` | Cross-agent attention before independent searches |
+| `independent_argmax` | `true` | Fix off-turn agents to argmax (vs. sample) |
+
+Key settings in `configs/train/default.yaml`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `batch_size` | `256` | Samples per training step |
+| `unroll_steps` | `5` | Dynamics unroll length |
+| `n_step` | `10` | n-step return horizon |
+| `num_data_actors` | `4` | Parallel CPU data collection workers |
+| `num_reanalyze_actors` | `1` | Reanalysis workers (0 to disable) |
+| `replay_buffer_capacity` | `100000` | Replay buffer size |
+
+---
+
+## Research Directions & Future Ideas
+
+### Core Research Problem
+
+Instead of searching over the joint action space $A^N$ (exponential), decompose planning into $N$ individual searches over $A$ each (linear). The challenge is enabling coordination between agents who plan independently.
+
+This is implemented in `mcts/mcts_independent.py`. The key open research questions are:
+
+- What information should be shared between agents before or during their searches?
+- How should prior agents' decisions influence later agents' searches without breaking CTDE?
+- How do we avoid temporal staleness when a planning signal derived at the root becomes stale deeper in the tree?
+
+### Communication Before Commitment (Implemented)
+
+An optional cross-agent attention pass (`use_root_communication=true`) applied to root latent states before any MCTS search runs. Each agent's hidden state becomes a weighted mixture of all agents' hidden states, giving each search a global view of the team's current state. Zero overhead when disabled.
+
+This is the least invasive coordination mechanism in the codebase — worth trying first before more complex inter-search communication.
+
+### Other Future Directions
+
+**Model:**
+- **Observation normalization** — running mean/variance layer at the top of `RepresentationNetwork`. Stabilizes training when observation scales vary across environments.
+- **Recurrent dynamics (GRU/LSTM)** — replace or augment the MLP in `DynamicsNetwork` with a recurrent cell for partial observability. Requires carrying hidden state through MCTS simulations.
+- **Multi-step consistency loss (SPR)** — compute consistency targets over k unroll steps instead of just step t→t+1. Schwarzer et al. (2021) show significant sample efficiency gains.
+- **Data augmentation for consistency** — apply random noise or masking to the online branch's observations only. Target branch sees clean observations.
+
+**MCTS:**
+- **Sequential MCTS** — agents plan in order, each conditioning on committed actions of prior agents. The key design question: concatenate prior actions into the latent, or pass a communication vector between trees?
+- **Temperature annealing** — anneal `num_gumbel_samples` from high (exploration) to low (exploitation) over training.
+- **Factored policy targets** — for `MCTSJointPlanner`, preserve joint coordination information instead of marginalizing it out.
+
+**Training:**
+- **Larger batch sizes** — 512 or 1024 amortizes Ray scheduling overhead better. The C++ replay buffer handles high throughput without contention.
+- **More DataActors** — GPU learner is the bottleneck after the self-driving loop fix and async param sync. Adding more actors still helps data throughput.
+
+---
 
 ## What Didn't Work
 
-### Permutation Invariant Critic (implemented on the MAZero codebase)
-**What I tried:**
-- Integrated a [Permutation Invariant Critic](https://arxiv.org/pdf/1911.00025) (PIC) as a replacement for the MLP-based reward and value networks.
+### Permutation Invariant Critic
 
-**Why I thought it might help:**
-- Theoretically, a permutation-invariant architecture would better model inter-agent relationships and generalize across agent orderings, leading to improved reward/value estimation and more stable training.
-
-**Why it didn't work:**
-- In practice, it yielded minimal performance gains on several SMAC environments while adding significant architectural complexity. It also didn’t offer enough novelty to justify the tradeoff from a research perspective.
-
-**Notes:**
-- May still be beneficial in settings with larger agent counts or more complex coordination — as shown in the original PIC paper. Also relatively easy to plug into existing pipelines if revisiting.
+Integrated a [Permutation Invariant Critic](https://arxiv.org/pdf/1911.00025) (PIC) as the reward/value head. Minimal performance gains on SMAC environments, significant architectural complexity, insufficient novelty. May still be useful with larger agent counts.
 
 ### Synchronous Training
-**What I tried:**
-- Replaced the asynchronous EfficientZero-style architecture with a fully synchronous training loop written entirely in JAX (see `synch` branch).
 
-**Why I thought it might help:**
-- Expected significant wall-clock performance gains by removing CPU-GPU communication overhead and leveraging JAX’s speed and simplicity. The synchronous loop also makes the system easier to debug and reason about.
-
-**Why it didn't work:**
-- Performance was worse than random — the policy entered a negative learning cycle and failed to improve. The root cause remains unclear despite extensive debugging. While reduced data diversity could be a factor, it doesn’t fully explain the degradation.
-
-**Notes:**
-- If someone can debug and fix this, the codebase could become much simpler and faster. The `synch` branch includes several unit tests and instrumentation to help trace the problem. Worth revisiting if you want to eliminate Ray entirely.
+Replaced the asynchronous architecture with a fully synchronous JAX training loop (see `synch` branch). Performance was worse than random — the policy entered a negative learning cycle with unclear root cause. Reduced data diversity is a likely factor, but doesn't fully explain the degradation. Worth revisiting to eliminate Ray entirely.
 
 ### Delta Network + Coordination Context
-**What I tried:**
-- A coordination cell (a GRU) that aggregated hidden states and action statistics from the previous agent’s search. This produced a "planning vector" passed to the next agent, allowing agents to condition their search on the decisions of earlier agents. 
-- A delta network (an MLP) that took the current state, predicted policy, and planning vector to compute a delta — a correction applied to the off-turn agents' actions to make them more coordinated with the current agent
 
-**Why I thought it might help:**
-- This idea attempts to mitigate the coordination problem of independent MCTS while still maintaining Centralized Training with Decentralized Execution (CTDE). My hypothesis was that the gap between an optimal (coordinated) policy and a greedy, independent one should be learnable. The delta network would capture this difference and apply it during search to bias agents toward coordinated behavior.
+A GRU coordination cell aggregated hidden states and action statistics from the previous agent's search into a "planning vector" passed to the next agent. A separate delta MLP computed a correction to off-turn agents' actions.
 
-**Why it didn't work:**
-- The main issue was a lack of a clear, effective loss function. Training the delta network to match MCTS policy targets simply pushed the delta to zero, having no effect. Value-based gradient methods weren’t applicable due to the strictly off-policy nature of the data. Additionally, the planning vector was only meaningful at the root of the search tree, yet had to be applied several simulation steps later. This introduced temporal staleness, instability, and noise in coordination signals. The overall system added substantial complexity and did not improve performance on tested environments.
+Failed because: no clear training objective (matching MCTS targets pushed delta to zero; value-based gradients inapplicable to strictly off-policy data), and the planning vector was only meaningful at the root but had to be applied steps later, introducing temporal staleness.
 
-**Notes:**
-- Conceptually, this remains one of the few approaches I can think of that combines inter-agent conditioning with CTDE constraints. If someone can address the temporal staleness issue and creating a proper learning objective, then this architecture may still offer a promising way to guide multi-agent coordination during latent-space planning.
+Conceptually the most promising architecture seen for combining inter-agent conditioning with CTDE. If someone solves the objective and staleness problems, this may still be viable.
 
 ### Policy Network Conditioning
 
-**What I tried:**
-- A simplified variation of the delta network idea, where instead of applying a learned delta to the policy, I directly fed the planning vector into the policy network as an additional input. During unconditioned rollouts, a zero vector was passed instead.
-
-**Why I thought it might help:**
-- The delta network was collapsing to zero and lacked a stable training objective. By integrating the planning signal directly into the policy network, I hoped it would learn to interpret and use the coordination information more effectively, simplifying the architecture.
-
-**Why it didn't work:**
-- This doesn't address the temporal staleness in the planning vector. During the search, a planning vector with information about state $s_t$ is not applicable to state $s_{t+z}$. Thus, even with the combined roles, the additional information given simply isn't useful. Additionally, it was difficult to ensure the network was meaningfully using the vector without over-relying on it or ignoring it entirely. It also splits the gradients for the policy network between training to work with the planning vector and without it. This becomes more apparent as well with the training testing discrepancy. The training almost always has the planning vector accessible, but during execution, the planning vector is essentially always zero. The policy network improving with the planning vector doesn't imply that the policy network is improving its output without the planning vector, so its overall performance was worse than the independent implementation.
-
-**Notes**:
-- I don't think this idea really has any potential. However, there are some clever ideas to fix the temporal staleness issue. Having another network adjust the planning vector depending on the state could be an interesting idea. You could also make the training force the planning vector to encode short-term relevant information.
+Simplified the delta network by directly feeding the planning vector into the policy network (zero vector when absent). Still suffered from temporal staleness in the search. Also creates a training/execution mismatch: training almost always has the planning vector; execution almost never does. The policy improving with the vector doesn't imply it improves without it.
 
 ### Autoregressive Policy Network
-**What I tried:**
-- Attempted to implement the autoregressive policy network from [this paper](https://github.com/PKU-MARL/Multi-Agent-Transformer), which models inter-agent dependencies by generating agent actions sequentially. This breaks CTDE, but shows strong empirical performance in cooperative multi-agent tasks.
 
-**Why I thought it might help:**
-- The paper aligns closely with our research direction, especially in modeling agent-level coordination through structured action generation. Although it was demonstrated in an on-policy PPO-style setup, the same principles seemed applicable to our setting.
+Attempted to implement the autoregressive policy from [Multi-Agent Transformer](https://arxiv.org/pdf/2205.14953) — sequential action generation with transformer-based inter-agent dependencies. Blocked by JAX tracer issues from the recursive sequential structure. Even with a working implementation, each policy call becomes quadratic in agents × search steps, incompatible with efficient MCTS in non-toy environments.
 
-**Why it didn't work:**
-- I was unable to complete the implementation due to the architectural complexity of translating a full transformer-based autoregressive model into this codebase. The `transformer` branch contains an early-stage attempt, but progress was blocked by difficult-to-debug JAX tracer issues, likely caused by the model's recursive, sequential structure.
-Even with a working implementation, the approach would be computationally infeasible under current infrastructure: each policy call becomes a quadratic-time operation in both the number of agents and search steps, which is incompatible with efficient planning in anything but toy environments.
+This is the most promising idea for coordination quality. Strong empirical evidence in the literature. Extremely complex implementation — expect significant time on architecture, profiling, and attention optimizations (KV caching, quantization) before it's viable.
 
-**Notes:**
-- I believe this is the most promising idea for improving coordination quality. There is strong supporting evidence from the multi-agent RL literature, and if the wall-clock time issue is addressed and the CTDE violations can be tolerated, then I believe this is the most paper-worthy idea. However, this is an extremely complicated implementation, and implementing optimizations to the attention process (caching, quantization, etc.) will drastically increase code complexity. If you want to pursue this direction, expect to dedicate a significant amount of time debugging, profiling, and implementing just the architecture of this idea.
+---
 
 ## Relevant Papers
 
 - [MuZero](https://arxiv.org/pdf/1911.08265)
+- [Gumbel MuZero](https://openreview.net/pdf?id=bERaNdoegnO)
+- [EfficientZero](https://arxiv.org/pdf/2111.00210)
 - [MAZero](https://openreview.net/pdf?id=CpnKq3UJwp)
-- [Multi-agent Transformer](https://arxiv.org/pdf/2205.14953)
+- [Multi-Agent Transformer](https://arxiv.org/pdf/2205.14953)
 - [Permutation Invariant Critic](https://arxiv.org/pdf/1911.00025)
-- [Hetergeneous Agent Reinforcment Learning](https://arxiv.org/pdf/2304.09870)
+- [Heterogeneous Agent Reinforcement Learning](https://arxiv.org/pdf/2304.09870)
+- [Self-Predictive Representations (SPR)](https://arxiv.org/pdf/2007.05929)
+
+---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).  
-You are free to use, modify, and distribute this software with attribution. See the LICENSE file for details.
+This project is licensed under the [MIT License](LICENSE).
+You are free to use, modify, and distribute this software with attribution.

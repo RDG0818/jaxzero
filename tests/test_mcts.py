@@ -57,6 +57,7 @@ def test_config():
             lr_warmup_steps=100,
             value_scale=0.25,
             consistency_scale=2.0,
+            consistency_horizon=1,
             gradient_clip_norm=5.0,
             unroll_steps=5,
             n_step=10,
@@ -90,6 +91,7 @@ def test_config():
             proj_out=16,
             pred_hid=16,
             pred_out=16,
+            use_obs_normalization=False,
         ),
         mcts=MCTSConfig(
             planner_mode="independent",

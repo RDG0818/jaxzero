@@ -16,6 +16,7 @@ end_lr_factor: 0.1
 lr_warmup_steps: 5000
 value_scale: 0.25
 consistency_scale: 1.0
+consistency_horizon: 1   # SPR multi-step horizon (1 = original k=1 only, 3 = k=1,2,3)
 gradient_clip_norm: 5.0
 unroll_steps: 5
 n_step: 10

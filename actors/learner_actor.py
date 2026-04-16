@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import time
 import numpy as np
@@ -6,6 +7,7 @@ import ray
 
 from config import ExperimentConfig
 from utils.logging_utils import logger
+from utils.obs_norm import ObsRunningNorm
 from utils.profiler import Profiler
 
 
@@ -27,6 +29,8 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
     U = config.train.unroll_steps
     value_scale = config.train.value_scale
     consistency_scale = config.train.consistency_scale
+    # Clamp horizon to U so range(U+1-k) is always ≥ 1.
+    consistency_horizon = min(int(config.train.consistency_horizon), U)
 
     def train_step(params, opt_state, batch, weights, rng_key, ema_params):
         # Pre-compute categorical support targets outside loss_fn so they
@@ -59,12 +63,11 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
             )
 
             # ---- Steps 1..U: unroll via scan ----
+            # Consistency is computed outside the scan so multi-step pairs
+            # (h_t, h_{t+k}) for k>1 can reuse the same hidden states.
             def scan_step(hidden, inputs):
                 ai, ri_dist, pi_target, vi_dist, step_key = inputs
 
-                online_proj = model.apply(
-                    {"params": p}, hidden, method=model.project_online
-                )
                 out = model.apply(
                     {"params": p}, hidden, ai,
                     method=model.recurrent_inference,
@@ -72,30 +75,15 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 )
                 next_hidden = out.hidden_state
 
-                # EMA target: use the slowly-moving average of params rather than
-                # stop_gradient on the same params. EMA params are passed in as a
-                # separate argument so they don't participate in the gradient.
-                target_proj = model.apply(
-                    {"params": ema_params}, next_hidden, method=model.project_target
-                )
-
                 ri_loss = optax.softmax_cross_entropy(out.reward_logits, ri_dist)
                 pi_loss = optax.softmax_cross_entropy(
                     out.policy_logits, pi_target
                 ).mean(axis=-1)
                 vi_loss = optax.softmax_cross_entropy(out.value_logits, vi_dist)
 
-                B_, N_, D_ = online_proj.shape
-                # epsilon=1e-8 prevents 0/0 NaN when projection vectors have near-zero
-                # norm — common early in training and with SMAX's zeroed dead-agent obs.
-                sim = optax.cosine_similarity(
-                    online_proj.reshape(B_ * N_, D_),
-                    target_proj.reshape(B_ * N_, D_),
-                    epsilon=1e-8,
-                ).reshape(B_, N_).mean(axis=-1)
-                cons_loss = -sim
-
-                return next_hidden, (ri_loss, pi_loss, vi_loss, cons_loss)
+                # next_hidden returned as output so the caller can collect all
+                # hidden states for multi-step consistency.
+                return next_hidden, (ri_loss, pi_loss, vi_loss, next_hidden)
 
             # Transpose to step-major for scan: (B, U, ...) → (U, B, ...)
             xs = (
@@ -105,15 +93,49 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 jnp.moveaxis(value_target_dist[:, 1:], 1, 0),
                 unroll_keys,
             )
-            _, (ri_losses, pi_losses, vi_losses, cons_losses) = jax.lax.scan(
+            _, (ri_losses, pi_losses, vi_losses, scan_hiddens) = jax.lax.scan(
                 scan_step, hidden, xs
             )
-            # Each: (U, B)
+            # ri_losses, pi_losses, vi_losses: (U, B)
+            # scan_hiddens: (U, B, N, D) — h_1 through h_U
 
-            reward_loss      = ri_losses.mean(axis=0)
-            policy_loss      = (p0_loss + pi_losses.sum(axis=0)) / (U + 1)
-            value_loss       = (v0_loss + vi_losses.sum(axis=0)) / (U + 1)
-            consistency_loss = cons_losses.mean(axis=0)
+            reward_loss = ri_losses.mean(axis=0)
+            policy_loss = (p0_loss + pi_losses.sum(axis=0)) / (U + 1)
+            value_loss  = (v0_loss + vi_losses.sum(axis=0)) / (U + 1)
+
+            # ---- Multi-step SPR consistency ----
+            # For each k in 1..consistency_horizon and each valid start position t,
+            # compare project_online(h_t) against project_target(h_{t+k}).
+            # k=1 reproduces the original single-step consistency loss.
+            # k>1 adds longer-range targets, improving latent prediction accuracy
+            # over multiple dynamics steps (SPR, Schwarzer et al. 2021).
+            #
+            # XLA CSE: project_online(h_t) is only computed once regardless of how
+            # many k values reference h_t, so cost stays O(U+1) projections.
+            #
+            # all_hiddens[i] = h_i,  shape (U+1, B, N, D)
+            all_hiddens = jnp.concatenate([hidden[jnp.newaxis], scan_hiddens], axis=0)
+            cons_pairs = []
+            for k in range(1, consistency_horizon + 1):
+                for t in range(U + 1 - k):
+                    h_t  = all_hiddens[t]        # (B, N, D)
+                    h_tk = all_hiddens[t + k]    # (B, N, D)
+                    online = model.apply(
+                        {"params": p}, h_t, method=model.project_online
+                    )
+                    target = model.apply(
+                        {"params": ema_params}, h_tk, method=model.project_target
+                    )
+                    B_, N_, D_ = online.shape
+                    # epsilon=1e-8 prevents 0/0 NaN with near-zero projection norms
+                    # (common early in training and with dead-agent zeroed obs).
+                    sim = optax.cosine_similarity(
+                        online.reshape(B_ * N_, D_),
+                        target.reshape(B_ * N_, D_),
+                        epsilon=1e-8,
+                    ).reshape(B_, N_).mean(axis=-1)  # (B,)
+                    cons_pairs.append(-sim)
+            consistency_loss = jnp.stack(cons_pairs).mean(axis=0)  # (B,)
 
             loss = (
                 reward_loss
@@ -203,6 +225,9 @@ class LearnerActor:
         self.rng_key, init_key = jax.random.split(self.rng_key)
         self.params = model.init(init_key, dummy_obs)["params"]
 
+        self._use_obs_norm = config.model.use_obs_normalization
+        self.obs_norm = ObsRunningNorm(obs_size) if self._use_obs_norm else None
+
         lr = config.train.learning_rate
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
@@ -254,6 +279,11 @@ class LearnerActor:
             self.opt_state = restored["opt_state"]
             self.ema_params = restored.get("ema_params", self.params)
             self.train_step_count = int(restored["step"])
+            if self._use_obs_norm and "obs_norm_mean" in restored:
+                self.obs_norm = ObsRunningNorm.from_state(
+                    {"mean": restored["obs_norm_mean"], "var": restored["obs_norm_var"]},
+                    obs_size,
+                )
             logger.info(
                 f"(Learner pid={os.getpid()}) Restored checkpoint from step {self.train_step_count}."
             )
@@ -290,6 +320,14 @@ class LearnerActor:
 
         # Fire the next buffer sample immediately so it overlaps with GPU compute.
         self._prefetch_batch()
+
+        # Observation normalization: update running stats then normalize the batch.
+        # Done on CPU (numpy) before device_put so the GPU only sees clean inputs.
+        if self._use_obs_norm:
+            self.obs_norm.update(batch.observation)
+            batch = dataclasses.replace(
+                batch, observation=self.obs_norm.normalize(batch.observation)
+            )
 
         # Dispatch H2D transfer immediately after getting the batch (JAX async —
         # returns a future-like DeviceArray; actual DMA runs in background).
@@ -411,12 +449,17 @@ class LearnerActor:
             "ema_params": self.ema_params,
             "step": np.array(self.train_step_count),
         }
+        if self._use_obs_norm:
+            norm_s = self.obs_norm.state()
+            state["obs_norm_mean"] = norm_s["mean"]
+            state["obs_norm_var"] = norm_s["var"]
         self.ckpt_manager.save(self.train_step_count, args=ocp.args.StandardSave(state))
         self.ckpt_manager.wait_until_finished()
         logger.info(f"(Learner) Saved checkpoint at step {self.train_step_count}.")
 
     def get_params(self):
-        return self.params
+        norm_state = self.obs_norm.state() if self._use_obs_norm else None
+        return {"params": self.params, "norm_state": norm_state}
 
     def get_train_step_count(self) -> int:
         return self.train_step_count
