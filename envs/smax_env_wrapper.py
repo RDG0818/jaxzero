@@ -82,13 +82,14 @@ class VecSMAXEnvWrapper:
             a: jnp.asarray(actions[:, i], dtype=jnp.int32)
             for i, a in enumerate(self.agents)
         }
-        next_obs_dict, next_states, rewards_dict, dones_dict, _ = self._step_fn(
+        next_obs_dict, next_states, rewards_dict, dones_dict, info = self._step_fn(
             rng_keys, states, action_dict
         )
         # All allies share the same team reward — take one ally's reward, not the sum.
         rewards = rewards_dict[self.agents[0]]  # (B,)
         dones = dones_dict["__all__"]           # (B,)
-        return self._stack(next_obs_dict), next_states, rewards, dones
+        won = info.get("won_episode", jnp.zeros_like(dones, dtype=bool))
+        return self._stack(next_obs_dict), next_states, rewards, dones, won
 
     def _stack(self, obs_dict):
         return jnp.stack(

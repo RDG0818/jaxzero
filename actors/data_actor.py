@@ -131,7 +131,7 @@ class DataActor:
 
             with self.profiler.time("env_step"):
                 step_keys = jax.random.split(step_key, B)
-                next_obs, next_states, rewards, dones = self.env.step(
+                next_obs, next_states, rewards, dones, *_ = self.env.step(
                     step_keys, states, actions_np
                 )
                 rewards_np = np.array(rewards)

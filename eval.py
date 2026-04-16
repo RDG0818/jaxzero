@@ -2,14 +2,14 @@
 Standalone evaluation script for a trained MuZero checkpoint.
 
 Loads a checkpoint, runs N episodes with MCTS (no gradient updates), and
-reports mean ± std episode return. Useful for comparing checkpoints or
-runs without re-training.
+reports mean ± std episode return. For SMAC environments also reports win rate.
 
 Usage:
-  python eval.py                                    # default config + latest checkpoint
-  python eval.py train.checkpoint_dir=runs/myrun   # specific run directory
-  python eval.py eval_episodes=200                  # more episodes for tighter estimate
-  python eval.py train.num_simulations=100          # more MCTS sims for eval
+  python eval.py                                       # default config + latest checkpoint
+  python eval.py train.checkpoint_dir=runs/myrun       # specific run directory
+  python eval.py eval_episodes=200                     # more episodes for tighter estimate
+  python eval.py train.num_simulations=100             # more MCTS sims for eval
+  python eval.py 'train.env_name="3m"' train.num_agents=3 train.max_episode_steps=150
 """
 
 import os
@@ -25,12 +25,12 @@ from utils.logging_utils import logger
 
 
 @ray.remote
-def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_episodes: int) -> list:
+def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_episodes: int) -> tuple:
     """
     Runs `num_episodes` evaluation episodes in a Ray task (keeps JAX off the
     main process, same pattern as DataActor and _fetch_env_metadata).
 
-    Returns a list of undiscounted episode returns.
+    Returns (returns, wins, ckpt_step) where wins is None for non-SMAC envs.
     """
     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     os.environ["JAX_PLATFORMS"] = "cpu"
@@ -41,7 +41,9 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
     from pathlib import Path
     from model import FlaxMAMuZeroNet
     from mcts import MCTSIndependentPlanner, MCTSJointPlanner
-    from envs import VecMPEEnvWrapper
+    from envs import make_vec_env_wrapper
+
+    is_smac = not config.train.env_name.startswith("MPE_")
 
     # Load checkpoint.
     ckpt_dir = Path(config.train.checkpoint_dir).absolute()
@@ -65,7 +67,7 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
     plan_fn = jax.jit(planner.plan)
 
     B = config.train.num_envs_per_actor
-    env = VecMPEEnvWrapper(
+    env = make_vec_env_wrapper(
         config.train.env_name,
         config.train.num_agents,
         config.train.max_episode_steps,
@@ -73,6 +75,7 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
     )
 
     returns = []
+    wins = [] if is_smac else None
     episodes_done = 0
 
     while episodes_done < num_episodes:
@@ -80,6 +83,7 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
         reset_keys = jnp.stack(reset_keys_list)
         observations, states = env.reset(reset_keys)
         episode_returns = np.zeros(B)
+        episode_won = np.zeros(B, dtype=bool)
         active = np.ones(B, dtype=bool)
 
         for _ in range(config.train.max_episode_steps):
@@ -88,11 +92,17 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
             actions_np = np.array(plan_output.joint_action)
 
             step_keys = jax.random.split(step_key, B)
-            next_obs, next_states, rewards, dones = env.step(step_keys, states, actions_np)
+            step_result = env.step(step_keys, states, actions_np)
+            next_obs, next_states, rewards, dones = step_result[:4]
             rewards_np = np.array(rewards)
             dones_np = np.array(dones)
 
             episode_returns += rewards_np * active
+            if is_smac:
+                won_np = np.array(step_result[4])
+                # won_episode is only meaningful when the episode ends
+                episode_won |= (won_np & dones_np & active)
+
             active &= ~dones_np
             observations = next_obs
             states = next_states
@@ -101,9 +111,11 @@ def _run_eval(obs_size: int, action_size: int, config: ExperimentConfig, num_epi
                 break
 
         returns.extend(episode_returns.tolist())
+        if is_smac:
+            wins.extend(episode_won.tolist())
         episodes_done += B
 
-    return returns, step
+    return returns, wins, step
 
 
 def _build_config(cfg: DictConfig) -> ExperimentConfig:
@@ -121,8 +133,7 @@ def main(cfg: DictConfig):
 
     ray.init(ignore_reinit_error=True)
 
-    # Fetch env metadata (same pattern as train.py).
-    from train import _fetch_env_metadata
+    from train.muzero import _fetch_env_metadata
     obs_size, action_size = ray.get(_fetch_env_metadata.remote(config))
 
     logger.info(
@@ -130,21 +141,25 @@ def main(cfg: DictConfig):
         f"over {num_episodes} episodes..."
     )
     t0 = time.monotonic()
-    returns, ckpt_step = ray.get(
+    returns, wins, ckpt_step = ray.get(
         _run_eval.remote(obs_size, action_size, config, num_episodes)
     )
     elapsed = time.monotonic() - t0
 
     returns = np.array(returns)
-    logger.info(
+    msg = (
         f"Checkpoint step:  {ckpt_step}\n"
         f"Episodes:         {len(returns)}\n"
         f"Mean return:      {returns.mean():.3f}\n"
         f"Std  return:      {returns.std():.3f}\n"
         f"Min  return:      {returns.min():.3f}\n"
         f"Max  return:      {returns.max():.3f}\n"
-        f"Elapsed:          {elapsed:.1f}s"
     )
+    if wins is not None:
+        win_rate = np.mean(wins)
+        msg += f"Win rate:         {win_rate:.1%}  ({int(np.sum(wins))}/{len(wins)})\n"
+    msg += f"Elapsed:          {elapsed:.1f}s"
+    logger.info(msg)
 
     ray.shutdown()
 
