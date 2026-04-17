@@ -32,3 +32,4 @@ num_reanalyze_actors: 1
 reanalyze_batch_size: 256
 debug: false
 debug_interval: 100  # emit detailed debug logs every N learner training steps
+awpo_alpha: 0.0      # AWPO temperature; 0.0 = disabled (plain BC loss)

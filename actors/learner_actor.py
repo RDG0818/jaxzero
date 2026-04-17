@@ -31,6 +31,7 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
     consistency_scale = config.train.consistency_scale
     # Clamp horizon to U so range(U+1-k) is always ≥ 1.
     consistency_horizon = min(int(config.train.consistency_horizon), U)
+    awpo_alpha = float(config.train.awpo_alpha)  # 0.0 = disabled
 
     def train_step(params, opt_state, batch, weights, rng_key, ema_params):
         # Pre-compute categorical support targets outside loss_fn so they
@@ -52,15 +53,29 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
             )
             hidden = init_out.hidden_state  # (B, N, D)
 
-            # Mean over agents N → (B,)
-            p0_loss = optax.softmax_cross_entropy(
-                init_out.policy_logits, batch.policy_target[:, 0]
-            ).mean(axis=-1)
-
             # Centralized value → (B,)
             v0_loss = optax.softmax_cross_entropy(
                 init_out.value_logits, value_target_dist[:, 0]
             )
+
+            # AWPO: weight root policy loss by exp((V_mcts - V_net) / alpha).
+            # V_mcts is the MCTS root value stored at collection time;
+            # V_net is the network's current prediction. Normalizing by the
+            # batch mean keeps the loss scale stable across training.
+            # When awpo_alpha=0 (disabled), this branch is eliminated at JIT
+            # trace time and reduces to plain mean cross-entropy.
+            ce_p0 = optax.softmax_cross_entropy(
+                init_out.policy_logits, batch.policy_target[:, 0]
+            ).mean(axis=-1)  # (B,)
+            if awpo_alpha > 0.0:
+                v_mcts = batch.value_target[:, 0].mean(axis=-1)  # (B,)
+                v_net = support_to_scalar(init_out.value_logits, value_support)  # (B,)
+                advantage = v_mcts - v_net
+                awpo_w = jnp.exp(jnp.clip(advantage / awpo_alpha, -5.0, 5.0))
+                awpo_w = awpo_w / (awpo_w.mean() + 1e-8)
+                p0_loss = awpo_w * ce_p0  # (B,)
+            else:
+                p0_loss = ce_p0  # (B,)
 
             # ---- Steps 1..U: unroll via scan ----
             # Consistency is computed outside the scan so multi-step pairs

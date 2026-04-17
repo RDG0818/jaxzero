@@ -19,3 +19,4 @@ max_episode_steps: 150
 learning_rate: 1e-4
 n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
 warmup_episodes: 50      # paper: min replay 300 transitions (much lower than default 1000 eps)
+awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)

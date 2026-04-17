@@ -8,13 +8,14 @@ Contact: rdg291@msstate.edu
 
 1. [Overview](#overview)
 2. [Features](#features)
-3. [Installation](#installation)
-4. [Project Structure](#project-structure)
-5. [Configuration](#configuration)
-6. [Research Directions & Future Ideas](#research-directions--future-ideas)
-7. [What Didn't Work](#what-didnt-work)
-8. [Relevant Papers](#relevant-papers)
-9. [License](#license)
+3. [Performance Benchmarks](#performance-benchmarks)
+4. [Installation](#installation)
+5. [Project Structure](#project-structure)
+6. [Configuration](#configuration)
+7. [Research Directions & Future Ideas](#research-directions--future-ideas)
+8. [What Didn't Work](#what-didnt-work)
+9. [Relevant Papers](#relevant-papers)
+10. [License](#license)
 
 ---
 
@@ -70,6 +71,53 @@ IPPO and MAPPO implemented in pure JAX (no Ray):
 - Parameter sharing across agents; agent one-hot ID appended to observations.
 - Vectorized rollout via `jax.lax.scan` over T timesteps × B parallel environments.
 - **MAPPO centralized critic**: global state = concatenation of all agent observations `(B, N*obs_size)`.
+
+---
+
+## Performance Benchmarks
+
+All benchmarks run on SMAC 3m (3 allies vs 3 scripted enemies) against [MAZero](https://openreview.net/pdf?id=CpnKq3UJwp), the prior state-of-the-art implementation this repo is based on. Hardware: single GPU workstation, 12 CPU cores.
+
+### End-to-End Training Throughput
+
+30-minute timed runs, equivalent settings (batch=256, 50 MCTS sims, 10 Gumbel samples):
+
+| Metric | MAZero (1 actor) | This repo (1 actor) | This repo (6 actors) |
+|---|---|---|---|
+| Wall time | 5h 22m | 52m | 39m |
+| Episodes collected | ~2,800 | 7,300 | **18,100** |
+| ~Transitions collected | 60,000 | ~1,095,000 | **~2,715,000** |
+| Transitions/sec | ~3.3 | ~330 | **~990** |
+| Train step time | ~1,560ms | 14ms | **21ms** |
+| Buffer sample wait | ~4,350ms (learner starved) | 0.7ms | **1.5ms** |
+| Gradient steps / new transition | ~12x | ~27x | **~5.5x** |
+| Peak system RAM | ~31–32 GB | — | **~13.4 GB** |
+
+The original MAZero had the learner waiting on data (`Tc_perstep: 4.35s` >> `Tp_perstep: 1.56s`). This repo inverts that: `sample_wait=1.5ms` with the GPU never idle.
+
+The **~300× throughput gain** (6-actor vs MAZero) comes from three sources:
+1. **JaxMARL environments** — SMAX runs on JAX with JIT compilation vs original Python/StarCraft II bindings
+2. **Async actor-learner pipeline** — self-driving learner loop, async param sync, C++ replay buffer eliminate Ray round-trip overhead
+3. **Parallelism** — 6 actors × 4 vectorized envs = 24 parallel environments vs MAZero's single actor
+
+### Replay Buffer (`benchmarks/replay_buffer_benchmark.py`)
+
+C++ backend vs pure-Python/cpprb fallback (capacity=10,000, obs_size=64, batch=256):
+
+| Operation | C++ | Python | Speedup |
+|---|---|---|---|
+| `add()` | 357.6K items/s | 67.9K items/s | **5.3×** |
+| `sample(256)` | 0.040 ms | 0.158 ms | **3.9×** |
+| `sample_for_reanalysis()` | 0.022 ms | 0.103 ms | **4.7×** |
+| `update_priorities()` | 0.009 ms | 0.007 ms | 0.8× |
+| H2D transfer (pinned vs regular) | 0.852 ms | 1.071 ms | **1.26×** |
+
+`update_priorities` is slightly slower in C++ because cpprb has an optimized batched C sum-tree path; at 0.009ms absolute it is irrelevant. The pinned memory benefit is most visible at larger batch sizes where the pageable→pinned copy dominates H2D transfer time.
+
+Run the benchmark yourself:
+```bash
+python benchmarks/replay_buffer_benchmark.py
+```
 
 ---
 

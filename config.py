@@ -76,6 +76,7 @@ class TrainConfig:
     reanalyze_batch_size: int
     debug: bool
     debug_interval: int
+    awpo_alpha: float = 0.0  # AWPO temperature; 0.0 = disabled (plain BC loss)
 
 
 @dataclass(frozen=True)
