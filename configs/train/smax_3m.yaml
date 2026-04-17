@@ -20,3 +20,9 @@ learning_rate: 1e-4
 n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
 warmup_episodes: 50      # paper: min replay 300 transitions (much lower than default 1000 eps)
 awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)
+
+# Throughput tuning: SMAC episodes are 150 steps vs MPE's 25, and joint MCTS
+# with 100 simulations is CPU-heavy. Without these, the GPU starves at ~20-50%.
+num_actors: 10           # up from 6; more data throughput (CPUs have headroom)
+batch_size: 512          # up from 256; GPU does more work per step
+num_envs_per_actor: 8    # up from 4; amortizes JAX overhead, doubles data per actor
