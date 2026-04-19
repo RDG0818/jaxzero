@@ -88,7 +88,10 @@ class VecSMAXEnvWrapper:
         # All allies share the same team reward — take one ally's reward, not the sum.
         rewards = rewards_dict[self.agents[0]]  # (B,)
         dones = dones_dict["__all__"]           # (B,)
-        won = info.get("won_episode", jnp.zeros_like(dones, dtype=bool))
+        # JaxMARL info dict is empty for SMAX — detect wins from state instead.
+        # unit_alive: (B, num_allies + num_enemies); allies first, enemies after.
+        enemy_alive = next_states.state.unit_alive[..., self.num_agents:]  # (B, num_enemies)
+        won = dones & ~enemy_alive.any(axis=-1)  # True iff episode ended with all enemies dead
         return self._stack(next_obs_dict), next_states, rewards, dones, won
 
     def _stack(self, obs_dict):
