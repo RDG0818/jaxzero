@@ -102,6 +102,8 @@ def test_config():
             dirichlet_fraction=0.25,
             independent_argmax=True,
             use_root_communication=False,
+            mcts_rho=0.75,
+            mcts_lambda=0.8,
         ),
     )
 
