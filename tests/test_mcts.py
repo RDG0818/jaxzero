@@ -454,14 +454,17 @@ class TestComputeOslaValue:
         v = compute_osla_value(depths, values, rho=0.75, lam=0.8)
         assert jnp.allclose(v, 1.0, atol=1e-4)
 
-    def test_depth_weighting_same_value(self):
-        """If all kept sims have the same value, depth weighting doesn't change the result."""
+    def test_depth_weighting_discounts_deeper_sims(self):
+        """Deeper sims get less weight (lam^depth); verifies weighted mean is computed correctly."""
         from mcts.mcts_joint_osla import compute_osla_value
         depths = jnp.array([1, 5], dtype=jnp.int32)
-        values = jnp.array([1.0, 1.0], dtype=jnp.float32)
-        # rho=1.0: keep both. Both have value 1.0 so result = 1.0 regardless of weights.
+        values = jnp.array([1.0, 0.5], dtype=jnp.float32)
+        # rho=1.0: keep both. weights = [0.8^1, 0.8^5] = [0.8, 0.32768]
+        # weighted mean = (0.8*1.0 + 0.32768*0.5) / (0.8 + 0.32768)
+        w1, w2 = 0.8 ** 1, 0.8 ** 5
+        expected = (w1 * 1.0 + w2 * 0.5) / (w1 + w2)
         v = compute_osla_value(depths, values, rho=1.0, lam=0.8)
-        assert jnp.allclose(v, 1.0, atol=1e-4)
+        assert jnp.allclose(v, expected, atol=1e-4)
 
     def test_jit_compatible(self):
         """Must be JIT-compilable."""
