@@ -429,3 +429,46 @@ def test_mcts_config_has_osla_fields():
     )
     assert cfg.mcts_rho == 0.75
     assert cfg.mcts_lambda == 0.8
+
+
+# ─── OS(λ) value aggregation tests ───────────────────────────────────────────
+
+class TestComputeOslaValue:
+    """Tests for the OS(λ) value aggregation function."""
+
+    def test_all_same_depth_rho_one_equals_mean(self):
+        """When all sims reach same depth, OS(λ) with rho=1.0 = plain mean."""
+        from mcts.mcts_joint_osla import compute_osla_value
+        depths = jnp.array([1, 1, 1, 1], dtype=jnp.int32)
+        values = jnp.array([0.0, 0.0, 0.0, 1.0], dtype=jnp.float32)
+        # rho=1.0: keep all 4, mean = 0.25
+        v = compute_osla_value(depths, values, rho=1.0, lam=0.8)
+        assert jnp.allclose(v, 0.25, atol=1e-4)
+
+    def test_top_rho_amplifies_rare_wins(self):
+        """rho=0.75 keeps top 25% (1 out of 4), result = the win value (1.0)."""
+        from mcts.mcts_joint_osla import compute_osla_value
+        depths = jnp.array([1, 1, 1, 1], dtype=jnp.int32)
+        values = jnp.array([0.0, 0.0, 0.0, 1.0], dtype=jnp.float32)
+        # rho=0.75: keep top 25% = top 1 = value 1.0; weight = lambda^1 = 0.8
+        v = compute_osla_value(depths, values, rho=0.75, lam=0.8)
+        assert jnp.allclose(v, 1.0, atol=1e-4)
+
+    def test_depth_weighting_same_value(self):
+        """If all kept sims have the same value, depth weighting doesn't change the result."""
+        from mcts.mcts_joint_osla import compute_osla_value
+        depths = jnp.array([1, 5], dtype=jnp.int32)
+        values = jnp.array([1.0, 1.0], dtype=jnp.float32)
+        # rho=1.0: keep both. Both have value 1.0 so result = 1.0 regardless of weights.
+        v = compute_osla_value(depths, values, rho=1.0, lam=0.8)
+        assert jnp.allclose(v, 1.0, atol=1e-4)
+
+    def test_jit_compatible(self):
+        """Must be JIT-compilable."""
+        from mcts.mcts_joint_osla import compute_osla_value
+        fn = jax.jit(compute_osla_value, static_argnames=("rho", "lam"))
+        depths = jnp.array([1, 2, 3, 4], dtype=jnp.int32)
+        values = jnp.array([0.1, 0.5, 0.2, 0.9], dtype=jnp.float32)
+        v = fn(depths, values, rho=0.75, lam=0.8)
+        assert v.shape == ()
+        assert jnp.isfinite(v)
