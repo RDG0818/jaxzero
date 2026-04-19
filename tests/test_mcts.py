@@ -407,3 +407,23 @@ class TestMCTSJointPlanner:
         out = plan_fn(params, jax.random.PRNGKey(0), obs_1)
         assert out.joint_action.shape == (1, 1)   # (B=1, N=1)
         assert int(out.joint_action[0, 0]) < A
+
+
+# ─── MCTSConfig field tests ───────────────────────────────────────────────────
+
+def test_mcts_config_has_osla_fields():
+    from config import MCTSConfig
+    cfg = MCTSConfig(
+        planner_mode="joint",
+        num_simulations=8,
+        max_depth_gumbel_search=3,
+        num_gumbel_samples=4,
+        dirichlet_alpha=0.3,
+        dirichlet_fraction=0.25,
+        independent_argmax=True,
+        use_root_communication=False,
+        mcts_rho=0.75,
+        mcts_lambda=0.8,
+    )
+    assert cfg.mcts_rho == 0.75
+    assert cfg.mcts_lambda == 0.8

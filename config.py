@@ -37,6 +37,8 @@ class MCTSConfig:
     dirichlet_fraction: float
     independent_argmax: bool
     use_root_communication: bool
+    mcts_rho: float = 0.75    # OS(λ): top quantile fraction to keep (1-rho is discarded)
+    mcts_lambda: float = 0.8  # OS(λ): depth discount weight (lambda^depth)
 
 
 @dataclass(frozen=True)

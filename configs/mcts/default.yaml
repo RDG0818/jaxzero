@@ -6,3 +6,5 @@ dirichlet_alpha: 0.3
 dirichlet_fraction: 0.25
 independent_argmax: true
 use_root_communication: false
+mcts_rho: 0.75
+mcts_lambda: 0.8
