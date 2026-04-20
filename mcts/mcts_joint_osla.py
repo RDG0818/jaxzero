@@ -141,7 +141,7 @@ def _run_single_sim(
         )
         child_q = jnp.where(
             child_node_idxs >= 0,
-            tree.value_sum[safe_idxs] / jnp.maximum(child_visits, 1.0),
+            tree.reward[safe_idxs] + gamma * tree.value_sum[safe_idxs] / jnp.maximum(child_visits, 1.0),
             0.0,
         )
         prior_probs = tree.child_prior_prob[node_idx]
@@ -288,7 +288,6 @@ def _run_single_sim(
 def _logits_to_joint_logits(
     per_agent_logits: chex.Array,  # [N, A] — per-agent action logits
     N: int,
-    A_N: int,
 ) -> chex.Array:
     """Per-agent logits (N, A) → joint logits (A_N,) under independence assumption."""
     A = per_agent_logits.shape[-1]
@@ -347,7 +346,7 @@ def _osla_plan_single(
     )
     root_embedding = init_out.hidden_state[0]     # [N, D]
     root_value = utils.support_to_scalar(init_out.value_logits, value_support)[0]
-    root_joint_logits = _logits_to_joint_logits(init_out.policy_logits[0], N, A_N)
+    root_joint_logits = _logits_to_joint_logits(init_out.policy_logits[0], N)
 
     # Dirichlet noise on root prior
     dir_noise = jax.random.dirichlet(dir_key, alpha=jnp.full(A_N, dirichlet_alpha))
@@ -398,7 +397,7 @@ def _osla_plan_single(
         reward = utils.support_to_scalar(out.reward_logits, reward_support)
         # Convert per-agent logits [1, N, A] → joint logits [1, A_N]
         joint_logits = jax.vmap(
-            lambda lg: _logits_to_joint_logits(lg, N, A_N)
+            lambda lg: _logits_to_joint_logits(lg, N)
         )(out.policy_logits)
         import mctx
         return (
