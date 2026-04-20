@@ -281,3 +281,239 @@ def _run_single_sim(
         sim_depths=sim_depths,
         sim_values=sim_values,
     )
+
+
+# ─── Joint logits helpers ─────────────────────────────────────────────────────
+
+def _logits_to_joint_logits(
+    per_agent_logits: chex.Array,  # [N, A] — per-agent action logits
+    N: int,
+    A_N: int,
+) -> chex.Array:
+    """Per-agent logits (N, A) → joint logits (A_N,) under independence assumption."""
+    A = per_agent_logits.shape[-1]
+    log_probs = jax.nn.log_softmax(per_agent_logits, axis=-1)  # (N, A)
+    joint = log_probs[0]                                         # (A,)
+    for i in range(1, N):
+        joint = (joint[:, None] + log_probs[i][None, :]).reshape(-1)
+    return joint  # (A_N,)
+
+
+def _joint_policy_to_marginal(
+    joint_policy: chex.Array,     # (B, A_N)
+    N: int,
+    joint_action_shape: tuple,    # (A, A, ...) x N  — static tuple
+) -> chex.Array:
+    """Joint policy (B, A_N) → per-agent marginals (B, N, A)."""
+    B = joint_policy.shape[0]
+    reshaped = joint_policy.reshape(B, *joint_action_shape)
+    marginals = []
+    for i in range(N):
+        other_axes = tuple(j + 1 for j in range(N) if j != i)
+        marginals.append(jnp.sum(reshaped, axis=other_axes))  # (B, A)
+    return jnp.stack(marginals, axis=1)  # (B, N, A)
+
+
+# ─── Full planning loop (single environment, no batch) ───────────────────────
+
+def _osla_plan_single(
+    params,
+    rng_key: chex.Array,
+    observation: chex.Array,          # [N, obs_size]
+    model,
+    num_simulations: int,             # static
+    K: int,                           # static (num_gumbel_samples)
+    A_N: int,                         # static (action_space_size^num_agents)
+    max_depth: int,                   # static
+    gamma: float,
+    rho: float,
+    lam: float,
+    c_puct: float,
+    dirichlet_alpha: float,
+    dirichlet_fraction: float,
+    joint_action_shape: tuple,        # static
+    value_support,
+    reward_support,
+) -> MCTSPlanOutput:
+    """Core planning for one environment. vmapped over batch in MCTSJointOSLAPlanner."""
+    init_key, dir_key, rng = jax.random.split(rng_key, 3)
+    max_nodes = num_simulations + 1
+    N = observation.shape[0]
+
+    # ── Root inference ────────────────────────────────────────────────────────
+    obs_batched = observation[None]  # [1, N, obs_size]
+    init_out = model.apply(
+        {"params": params}, obs_batched, rngs={"dropout": init_key}
+    )
+    root_embedding = init_out.hidden_state[0]     # [N, D]
+    root_value = utils.support_to_scalar(init_out.value_logits, value_support)[0]
+    root_joint_logits = _logits_to_joint_logits(init_out.policy_logits[0], N, A_N)
+
+    # Dirichlet noise on root prior
+    dir_noise = jax.random.dirichlet(dir_key, alpha=jnp.full(A_N, dirichlet_alpha))
+    root_probs = jax.nn.softmax(root_joint_logits)
+    noisy_probs = (1 - dirichlet_fraction) * root_probs + dirichlet_fraction * dir_noise
+    noisy_root_logits = jnp.log(noisy_probs + 1e-30)
+
+    # Sample K children for root
+    sample_key, rng = jax.random.split(rng)
+    root_child_actions, root_child_probs = _sample_k_actions(sample_key, noisy_root_logits, K, A_N)
+
+    # ── Initialize tree ───────────────────────────────────────────────────────
+    D = root_embedding.shape[-1]
+    tree = OSLATree(
+        visit_counts=jnp.zeros(max_nodes, jnp.int32).at[0].set(1),  # root starts with 1 visit
+        value_sum=jnp.zeros(max_nodes, jnp.float32),
+        reward=jnp.zeros(max_nodes, jnp.float32),
+        embedding=jnp.zeros((max_nodes, N, D), jnp.float32).at[0].set(root_embedding),
+        depth=jnp.zeros(max_nodes, jnp.int32),
+        parent=jnp.full(max_nodes, -1, jnp.int32),
+        child_actions=jnp.zeros((max_nodes, K), jnp.int32).at[0].set(root_child_actions),
+        child_node_idx=jnp.full((max_nodes, K), -1, jnp.int32),
+        child_prior_prob=jnp.zeros((max_nodes, K), jnp.float32).at[0].set(root_child_probs),
+    )
+
+    init_carry = SimCarry(
+        tree=tree,
+        next_free=jnp.array(1, jnp.int32),
+        rng=rng,
+        sim_depths=jnp.zeros(num_simulations, jnp.int32),
+        sim_values=jnp.zeros(num_simulations, jnp.float32),
+    )
+
+    # ── Recurrent fn (batched interface required by _run_single_sim) ──────────
+    def recurrent_fn_batched(params, rng_key, flat_action_batch, embedding_batch):
+        # flat_action_batch: [1]; embedding_batch: [1, N, D]
+        per_agent = jnp.stack(
+            jnp.unravel_index(flat_action_batch, joint_action_shape), axis=-1
+        )  # [1, N]
+        out = model.apply(
+            {"params": params},
+            embedding_batch,
+            per_agent,
+            method=model.recurrent_inference,
+            rngs={"dropout": rng_key},
+        )
+        value = utils.support_to_scalar(out.value_logits, value_support)
+        reward = utils.support_to_scalar(out.reward_logits, reward_support)
+        # Convert per-agent logits [1, N, A] → joint logits [1, A_N]
+        joint_logits = jax.vmap(
+            lambda lg: _logits_to_joint_logits(lg, N, A_N)
+        )(out.policy_logits)
+        import mctx
+        return (
+            mctx.RecurrentFnOutput(
+                reward=reward,
+                discount=jnp.full_like(reward, gamma),
+                prior_logits=joint_logits,
+                value=value,
+            ),
+            out.hidden_state,
+        )
+
+    # ── Run simulations ───────────────────────────────────────────────────────
+    def sim_step(sim_idx, carry: SimCarry) -> SimCarry:
+        return _run_single_sim(
+            carry, sim_idx, params, recurrent_fn_batched,
+            K, A_N, max_depth, gamma, c_puct,
+        )
+
+    final_carry = jax.lax.fori_loop(0, num_simulations, sim_step, init_carry)
+
+    # ── OS(λ) root value ──────────────────────────────────────────────────────
+    osla_root_value = compute_osla_value(
+        final_carry.sim_depths, final_carry.sim_values, rho=rho, lam=lam
+    )
+
+    # ── Policy target from root child visit counts ────────────────────────────
+    root_children = final_carry.tree.child_node_idx[0]  # [K]
+    root_child_visits = jnp.where(
+        root_children >= 0,
+        final_carry.tree.visit_counts[jnp.maximum(root_children, 0)].astype(jnp.float32),
+        0.0,
+    )  # [K]
+
+    # Build sparse joint distribution over A_N actions
+    joint_visits = jnp.zeros(A_N).at[root_child_actions].add(root_child_visits)
+    joint_policy = joint_visits / (joint_visits.sum() + 1e-8)  # [A_N]
+
+    # Marginalize to per-agent targets (shape (1, A_N) for _joint_policy_to_marginal)
+    marginal_policy = _joint_policy_to_marginal(
+        joint_policy[None], N, joint_action_shape
+    )  # (1, N, A)
+
+    # Best action = most-visited root child
+    best_k = jnp.argmax(root_child_visits)
+    best_flat_action = root_child_actions[best_k]
+    best_action = jnp.stack(
+        jnp.unravel_index(best_flat_action, joint_action_shape), axis=-1
+    )  # (N,)
+
+    return MCTSPlanOutput(
+        joint_action=best_action[None],         # (1, N)
+        policy_targets=marginal_policy,          # (1, N, A)
+        root_value=osla_root_value[None],        # (1,)
+        agent_order=jnp.arange(N),
+    )
+
+
+# ─── Planner class ────────────────────────────────────────────────────────────
+
+class MCTSJointOSLAPlanner(MCTSPlanner):
+    """
+    Joint MCTS with OS(λ) backup.
+
+    Uses a custom JAX MCTS loop (not mctx) with PUCT selection,
+    K sampled joint actions per node, and OS(λ) value aggregation.
+    Replaces MCTSJointPlanner when planner_mode="joint".
+    """
+
+    def __init__(self, model: FlaxMAMuZeroNet, config: ExperimentConfig):
+        super().__init__(model, config)
+        self.joint_action_shape: tuple = (self.action_space_size,) * self.num_agents
+        self.A_N = self.action_space_size ** self.num_agents
+        self.mcts_rho = config.mcts.mcts_rho
+        self.mcts_lambda = config.mcts.mcts_lambda
+        # Override: don't JIT recurrent_fn standalone (it's called inside _osla_plan_single)
+        self._recurrent_fn_jit = None
+
+    def _recurrent_fn(self, params, rng_key, action, embedding):
+        raise NotImplementedError("MCTSJointOSLAPlanner uses recurrent_fn internally in _osla_plan_single.")
+
+    def _plan_loop(
+        self, params, rng_key: chex.Array, observation: chex.Array
+    ) -> MCTSPlanOutput:
+        """Vmapped single-env planning across batch."""
+        B = observation.shape[0]
+        rng_keys = jax.random.split(rng_key, B)
+
+        plan_single = functools.partial(
+            _osla_plan_single,
+            model=self.model,
+            num_simulations=self.num_simulations,
+            K=self.num_gumbel_samples,
+            A_N=self.A_N,
+            max_depth=self.max_depth_gumbel_search,
+            gamma=self.discount_gamma,
+            rho=self.mcts_rho,
+            lam=self.mcts_lambda,
+            c_puct=1.25,
+            dirichlet_alpha=self.dirichlet_alpha,
+            dirichlet_fraction=self.dirichlet_fraction,
+            joint_action_shape=self.joint_action_shape,
+            value_support=self.value_support,
+            reward_support=self.reward_support,
+        )
+
+        # vmap over (rng_keys, observation) — params are shared (in_axes=None)
+        results = jax.vmap(plan_single, in_axes=(None, 0, 0))(
+            params, rng_keys, observation
+        )
+
+        # vmap produces leading B dim; _osla_plan_single adds an extra 1 dim — squeeze it
+        return MCTSPlanOutput(
+            joint_action=results.joint_action.squeeze(1),      # (B, N)
+            policy_targets=results.policy_targets.squeeze(1),  # (B, N, A)
+            root_value=results.root_value.squeeze(1),          # (B,)
+            agent_order=results.agent_order[0],                 # (N,) — same for all
+        )

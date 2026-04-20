@@ -134,6 +134,36 @@ def joint_plan_fn(model_and_params, test_config):
     return jax.jit(planner.plan), planner
 
 
+@pytest.fixture(scope="module")
+def osla_config(test_config):
+    """MCTSConfig with joint planner + OS(λ)."""
+    return ExperimentConfig(
+        train=test_config.train,
+        model=test_config.model,
+        mcts=MCTSConfig(
+            planner_mode="joint",
+            num_simulations=8,
+            max_depth_gumbel_search=3,
+            num_gumbel_samples=4,
+            dirichlet_alpha=0.3,
+            dirichlet_fraction=0.25,
+            independent_argmax=True,
+            use_root_communication=False,
+            mcts_rho=0.75,
+            mcts_lambda=0.8,
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def osla_plan_fn(model_and_params, osla_config):
+    """JIT-compiled plan function for MCTSJointOSLAPlanner."""
+    from mcts.mcts_joint_osla import MCTSJointOSLAPlanner
+    net, _ = model_and_params
+    planner = MCTSJointOSLAPlanner(model=net, config=osla_config)
+    return jax.jit(planner.plan), planner
+
+
 @pytest.fixture
 def params(model_and_params):
     _, p = model_and_params
@@ -621,3 +651,62 @@ class TestRunSingleSimBackup:
 
         # New node (index 1) should have visit count 1
         assert result.tree.visit_counts[1] == 1
+
+
+# ─── MCTSJointOSLAPlanner end-to-end tests ───────────────────────────────────
+
+class TestMCTSJointOSLAPlanner:
+
+    def test_returns_plan_output(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert isinstance(out, MCTSPlanOutput)
+
+    def test_joint_action_shape(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert out.joint_action.shape == (1, N)
+
+    def test_policy_targets_shape(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert out.policy_targets.shape == (1, N, A)
+
+    def test_actions_in_valid_range(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert jnp.all(out.joint_action >= 0)
+        assert jnp.all(out.joint_action < A)
+
+    def test_policy_targets_sum_to_one(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        sums = jnp.sum(out.policy_targets, axis=-1)
+        assert jnp.allclose(sums, jnp.ones((1, N)), atol=1e-4)
+
+    def test_root_value_shape(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert out.root_value.shape == (1,)
+
+    def test_root_value_finite(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert jnp.isfinite(out.root_value).all()
+
+    def test_deterministic_with_same_key(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out1 = plan_fn(params, jax.random.PRNGKey(7), obs)
+        out2 = plan_fn(params, jax.random.PRNGKey(7), obs)
+        assert jnp.array_equal(out1.joint_action, out2.joint_action)
+
+    def test_stochastic_with_different_keys(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        results = [plan_fn(params, jax.random.PRNGKey(i), obs).joint_action for i in range(10)]
+        all_same = all(jnp.array_equal(results[0], r) for r in results[1:])
+        assert not all_same
+
+    def test_agent_order_sequential(self, osla_plan_fn, params, obs):
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert jnp.array_equal(out.agent_order, jnp.arange(N))
