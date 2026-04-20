@@ -36,7 +36,7 @@ class DataActor:
 
         import jax
         from model import FlaxMAMuZeroNet
-        from mcts import MCTSIndependentPlanner, MCTSJointPlanner
+        from mcts import MCTSIndependentPlanner, MCTSJointPlanner, MCTSJointOSLAPlanner
         from envs import make_vec_env_wrapper
 
         self.actor_id = actor_id
@@ -57,7 +57,8 @@ class DataActor:
         model = FlaxMAMuZeroNet(config.model, action_size)
         planner_map = {
             "independent": MCTSIndependentPlanner,
-            "joint": MCTSJointPlanner,
+            "joint": MCTSJointOSLAPlanner,        # OS(λ) planner replaces mctx-based joint
+            "joint_legacy": MCTSJointPlanner,     # keep for ablations
         }
         if config.mcts.planner_mode not in planner_map:
             raise ValueError(
