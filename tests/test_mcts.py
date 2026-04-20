@@ -553,3 +553,71 @@ class TestSampleKActions:
         from mcts.mcts_joint_osla import _sample_k_actions
         actions, probs = _sample_k_actions(jax.random.PRNGKey(0), jnp.zeros(3), K=10, A_N=3)
         assert actions.shape == (10,)
+
+
+# ─── _run_single_sim backup correctness tests ────────────────────────────────
+
+class TestRunSingleSimBackup:
+    """Verify _run_single_sim produces correct backup values."""
+
+    def _make_fake_recurrent_fn(self, fixed_reward: float, fixed_value: float, A_N: int, N: int, D: int):
+        """Returns a recurrent_fn that always outputs fixed reward and value."""
+        import mctx
+        def fake_recurrent_fn(params, rng, flat_action, embedding):
+            B = flat_action.shape[0]
+            return (
+                mctx.RecurrentFnOutput(
+                    reward=jnp.full((B,), fixed_reward),
+                    discount=jnp.ones((B,)),
+                    prior_logits=jnp.zeros((B, A_N)),
+                    value=jnp.full((B,), fixed_value),
+                ),
+                embedding,  # pass through embedding unchanged
+            )
+        return fake_recurrent_fn
+
+    def test_root_backup_value_single_step(self):
+        """After 1 sim reaching depth 1: root_backup_value = r + gamma * V."""
+        from mcts.mcts_joint_osla import _run_single_sim, OSLATree, SimCarry, _sample_k_actions
+
+        K, A_N, N, D, max_depth, gamma = 4, 25, 2, 8, 3, 0.99
+        r, v = 0.5, 1.0  # fixed reward and value from the fake model
+
+        # Build a minimal root node with K sampled children
+        rng = jax.random.PRNGKey(0)
+        root_logits = jnp.zeros(A_N)
+        child_actions, child_probs = _sample_k_actions(rng, root_logits, K, A_N)
+
+        max_nodes = 5
+        tree = OSLATree(
+            visit_counts=jnp.array([1] + [0] * (max_nodes - 1), jnp.int32),
+            value_sum=jnp.zeros(max_nodes),
+            reward=jnp.zeros(max_nodes),
+            embedding=jnp.zeros((max_nodes, N, D)),
+            depth=jnp.zeros(max_nodes, jnp.int32),
+            parent=jnp.full(max_nodes, -1, jnp.int32),
+            child_actions=jnp.zeros((max_nodes, K), jnp.int32).at[0].set(child_actions),
+            child_node_idx=jnp.full((max_nodes, K), -1, jnp.int32),
+            child_prior_prob=jnp.zeros((max_nodes, K)).at[0].set(child_probs),
+        )
+        carry = SimCarry(
+            tree=tree,
+            next_free=jnp.array(1, jnp.int32),
+            rng=jax.random.PRNGKey(1),
+            sim_depths=jnp.zeros(1, jnp.int32),
+            sim_values=jnp.zeros(1, jnp.float32),
+        )
+
+        fake_rf = self._make_fake_recurrent_fn(r, v, A_N, N, D)
+        result = _run_single_sim(carry, jnp.array(0), None, fake_rf, K, A_N, max_depth, gamma)
+
+        # Root backup value = r + gamma * v
+        expected_root_val = r + gamma * v
+        assert jnp.allclose(result.sim_values[0], expected_root_val, atol=1e-4), \
+            f"Expected {expected_root_val:.4f}, got {result.sim_values[0]:.4f}"
+
+        # Root visit count should be 2 (was 1, got 1 from backup)
+        assert result.tree.visit_counts[0] == 2
+
+        # New node (index 1) should have visit count 1
+        assert result.tree.visit_counts[1] == 1

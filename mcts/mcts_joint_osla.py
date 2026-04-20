@@ -171,7 +171,7 @@ def _run_single_sim(
         path_nodes = sc.path_nodes.at[sc.depth].set(sc.node_idx)
         path_k = sc.path_k.at[sc.depth].set(sc.best_k)
         child_reward = tree.reward[sc.child_idx]
-        path_rewards = sc.path_rewards.at[sc.depth].set(child_reward)
+        path_rewards = sc.path_rewards.at[sc.depth + 1].set(child_reward)
         # Move to child, compute its best UCB child
         new_bk = _best_ucb(sc.child_idx)
         new_cidx = tree.child_node_idx[sc.child_idx, new_bk]
