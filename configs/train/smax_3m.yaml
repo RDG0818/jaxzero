@@ -23,6 +23,6 @@ awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)
 
 # Throughput tuning: SMAC episodes are 150 steps vs MPE's 25, and joint MCTS
 # with 100 simulations is CPU-heavy. Without these, the GPU starves at ~20-50%.
-num_actors: 6           # up from 6; more data throughput (CPUs have headroom)
+num_actors: 6           # CPUs have headroom; GPU starves below this
 batch_size: 1024         # GPU has headroom (51ms at 512 ≈ same as 54ms at 256)
 num_envs_per_actor: 8    # up from 4; amortizes JAX overhead, doubles data per actor

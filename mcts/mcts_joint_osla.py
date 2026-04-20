@@ -5,6 +5,7 @@ import functools
 import chex
 import jax
 import jax.numpy as jnp
+import mctx
 
 from model import FlaxMAMuZeroNet
 import utils.transforms as utils
@@ -345,7 +346,6 @@ def _osla_plan_single(
         {"params": params}, obs_batched, rngs={"dropout": init_key}
     )
     root_embedding = init_out.hidden_state[0]     # [N, D]
-    root_value = utils.support_to_scalar(init_out.value_logits, value_support)[0]
     root_joint_logits = _logits_to_joint_logits(init_out.policy_logits[0], N)
 
     # Dirichlet noise on root prior
@@ -399,7 +399,6 @@ def _osla_plan_single(
         joint_logits = jax.vmap(
             lambda lg: _logits_to_joint_logits(lg, N)
         )(out.policy_logits)
-        import mctx
         return (
             mctx.RecurrentFnOutput(
                 reward=reward,
