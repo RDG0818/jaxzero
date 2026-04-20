@@ -39,3 +39,59 @@ def compute_osla_value(
     weights = lam ** top_depths.astype(jnp.float32)  # [k_top]
 
     return (top_values * weights).sum() / (weights.sum() + 1e-8)
+
+
+# ─── Tree data structure ──────────────────────────────────────────────────────
+
+@chex.dataclass
+class OSLATree:
+    """Static-shaped search tree for one environment instance (no batch dim).
+
+    max_nodes = num_simulations + 1 (root + 1 new leaf per simulation).
+    K = num_gumbel_samples (sampled joint actions per node).
+    """
+    visit_counts:     chex.Array  # [max_nodes] int32
+    value_sum:        chex.Array  # [max_nodes] float32
+    reward:           chex.Array  # [max_nodes] float32 — reward to enter this node
+    embedding:        chex.Array  # [max_nodes, N, D] float32
+    depth:            chex.Array  # [max_nodes] int32
+    parent:           chex.Array  # [max_nodes] int32 (-1 = root)
+    child_actions:    chex.Array  # [max_nodes, K] int32 — flat joint action indices
+    child_node_idx:   chex.Array  # [max_nodes, K] int32 (-1 = not yet expanded)
+    child_prior_prob: chex.Array  # [max_nodes, K] float32
+
+
+@chex.dataclass
+class SimCarry:
+    """Outer fori_loop state across all simulations."""
+    tree:       OSLATree
+    next_free:  chex.Array   # [] int32 — next available node index
+    rng:        chex.Array   # PRNGKey
+    sim_depths: chex.Array   # [num_simulations] int32
+    sim_values: chex.Array   # [num_simulations] float32
+
+
+@chex.dataclass
+class SelectCarry:
+    """Inner while_loop state during tree selection."""
+    node_idx:     chex.Array  # [] int32 — current node
+    depth:        chex.Array  # [] int32
+    path_nodes:   chex.Array  # [max_depth+1] int32
+    path_k:       chex.Array  # [max_depth+1] int32
+    path_rewards: chex.Array  # [max_depth+1] float32 — reward[path_nodes[i]]
+    best_k:       chex.Array  # [] int32 — UCB-best child of current node
+    child_idx:    chex.Array  # [] int32 — child_node_idx[node, best_k]
+
+
+# ─── UCB helper ───────────────────────────────────────────────────────────────
+
+def compute_ucb_scores(
+    child_q:       chex.Array,  # [K] float32 — mean Q-value per child
+    child_visits:  chex.Array,  # [K] float32 — visit counts (0 = unvisited)
+    prior_probs:   chex.Array,  # [K] float32 — prior probabilities
+    parent_visits: chex.Array,  # [] float32 — total visits at parent
+    c_puct: float = 1.25,
+) -> chex.Array:
+    """PUCT formula: Q(a) + c_puct * P(a) * sqrt(N_parent + 1) / (1 + N(a))."""
+    exploration = c_puct * prior_probs * jnp.sqrt(parent_visits + 1.0) / (1.0 + child_visits)
+    return child_q + exploration

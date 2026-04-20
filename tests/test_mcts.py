@@ -475,3 +475,49 @@ class TestComputeOslaValue:
         v = fn(depths, values, rho=0.75, lam=0.8)
         assert v.shape == ()
         assert jnp.isfinite(v)
+
+
+# ─── OSLATree dataclass and UCB helper tests ──────────────────────────────────
+
+class TestOSLAHelpers:
+
+    def test_compute_ucb_prefers_unvisited(self):
+        """Unvisited children (visit_count=0) should have higher UCB than visited ones."""
+        from mcts.mcts_joint_osla import compute_ucb_scores
+        child_visits = jnp.array([5.0, 0.0, 3.0, 0.0])
+        child_q = jnp.array([0.5, 0.0, 0.3, 0.0])
+        prior_probs = jnp.array([0.25, 0.25, 0.25, 0.25])
+        parent_visits = jnp.array(8.0)
+        ucb = compute_ucb_scores(child_q, child_visits, prior_probs, parent_visits, c_puct=1.25)
+        # Unvisited children (indices 1, 3) should have higher UCB than visited ones
+        assert ucb[1] > ucb[0]
+        assert ucb[3] > ucb[2]
+
+    def test_compute_ucb_shape(self):
+        from mcts.mcts_joint_osla import compute_ucb_scores
+        K = 10
+        ucb = compute_ucb_scores(
+            jnp.zeros(K), jnp.zeros(K), jnp.ones(K) / K,
+            jnp.array(1.0), c_puct=1.25
+        )
+        assert ucb.shape == (K,)
+
+    def test_dataclasses_are_pytrees(self):
+        """OSLATree, SimCarry, SelectCarry must be registered as JAX pytrees."""
+        from mcts.mcts_joint_osla import OSLATree, SimCarry, SelectCarry
+        # chex.dataclass auto-registers as pytree; verify leaves/treedef work
+        tree = OSLATree(
+            visit_counts=jnp.zeros(5, jnp.int32),
+            value_sum=jnp.zeros(5),
+            reward=jnp.zeros(5),
+            embedding=jnp.zeros((5, 3, 32)),
+            depth=jnp.zeros(5, jnp.int32),
+            parent=jnp.full(5, -1, jnp.int32),
+            child_actions=jnp.zeros((5, 4), jnp.int32),
+            child_node_idx=jnp.full((5, 4), -1, jnp.int32),
+            child_prior_prob=jnp.zeros((5, 4)),
+        )
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+        assert len(leaves) == 9  # 9 fields
+        tree2 = treedef.unflatten(leaves)
+        assert jnp.array_equal(tree2.visit_counts, tree.visit_counts)
