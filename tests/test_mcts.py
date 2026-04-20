@@ -521,3 +521,35 @@ class TestOSLAHelpers:
         assert len(leaves) == 9  # 9 fields
         tree2 = treedef.unflatten(leaves)
         assert jnp.array_equal(tree2.visit_counts, tree.visit_counts)
+
+
+# ─── _sample_k_actions tests ──────────────────────────────────────────────────
+
+class TestSampleKActions:
+
+    def test_output_shapes(self):
+        from mcts.mcts_joint_osla import _sample_k_actions
+        rng = jax.random.PRNGKey(0)
+        actions, probs = _sample_k_actions(rng, jnp.zeros(729), K=10, A_N=729)
+        assert actions.shape == (10,)
+        assert probs.shape == (10,)
+
+    def test_actions_in_range(self):
+        from mcts.mcts_joint_osla import _sample_k_actions
+        rng = jax.random.PRNGKey(1)
+        actions, probs = _sample_k_actions(rng, jnp.zeros(729), K=10, A_N=729)
+        assert jnp.all(actions >= 0) and jnp.all(actions < 729)
+
+    def test_probs_are_subset_of_softmax(self):
+        """Returned probs must equal softmax(logits)[actions]."""
+        from mcts.mcts_joint_osla import _sample_k_actions
+        logits = jax.random.normal(jax.random.PRNGKey(2), (25,))
+        actions, probs = _sample_k_actions(jax.random.PRNGKey(3), logits, K=5, A_N=25)
+        expected_probs = jax.nn.softmax(logits)[actions]
+        assert jnp.allclose(probs, expected_probs, atol=1e-6)
+
+    def test_k_ge_an_uses_replacement(self):
+        """K >= A_N must not crash (uses replacement)."""
+        from mcts.mcts_joint_osla import _sample_k_actions
+        actions, probs = _sample_k_actions(jax.random.PRNGKey(0), jnp.zeros(3), K=10, A_N=3)
+        assert actions.shape == (10,)
