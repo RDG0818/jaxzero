@@ -28,3 +28,5 @@ num_actors: 1
 num_envs_per_actor: 4
 batch_size: 2048         # push GPU with freed CPU headroom
 num_reanalyze_actors: 3  # more than 2-3 starves the learner on a 12-core machine
+consistency_scale: 0.25  # default 1.0 causes consistency loss to dominate and degrade value/policy
+replay_buffer_size: 500000  # default 100k overwrites good episodes too fast (~30min to full refresh)
