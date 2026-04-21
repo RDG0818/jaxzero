@@ -18,11 +18,13 @@ max_episode_steps: 150
 # --- MaZero paper SMAC hyperparameters ---
 learning_rate: 1e-4
 n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
-warmup_episodes: 50      # paper: min replay 300 transitions (much lower than default 1000 eps)
+warmup_episodes: 50
 awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)
 
-# Throughput tuning: SMAC episodes are 150 steps vs MPE's 25, and joint MCTS
-# with 100 simulations is CPU-heavy. Without these, the GPU starves at ~20-50%.
-num_actors: 6           # CPUs have headroom; GPU starves below this
-batch_size: 1024         # GPU has headroom (51ms at 512 ≈ same as 54ms at 256)
-num_envs_per_actor: 8    # up from 4; amortizes JAX overhead, doubles data per actor
+# Match MAZero data collection: 1 actor × 4 parallel envs = 4 total.
+# Fewer envs means fewer gradient steps per env step, letting the GPU actually
+# learn from each transition. Freed CPU cores go to reanalyze actors instead.
+num_actors: 1
+num_envs_per_actor: 4
+batch_size: 2048         # push GPU with freed CPU headroom
+num_reanalyze_actors: 6  # MAZero uses 30; 6 fits our 12-core budget

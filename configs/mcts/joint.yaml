@@ -2,3 +2,4 @@ defaults:
   - default
 
 planner_mode: joint
+mcts_rho: 0.25  # MAZero paper value: keep top 75% of sims (not 25%)
