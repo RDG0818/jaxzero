@@ -54,10 +54,14 @@ def compute_osla_value_jax(
     Fixed-size arrays with validity mask — works inside JAX-traced functions.
     """
     max_sims = sim_values.shape[0]
-    k_top = jnp.maximum(
-        1,
-        jnp.floor((1.0 - rho) * n_visits.astype(jnp.float32)).astype(jnp.int32),
-    )
+    # rho is a Python float (static), so we can branch on it
+    if rho >= 1.0:
+        k_top = n_visits  # keep all valid entries
+    else:
+        k_top = jnp.maximum(
+            1,
+            jnp.floor((1.0 - rho) * n_visits.astype(jnp.float32)).astype(jnp.int32),
+        )
     valid_mask = jnp.arange(max_sims) < n_visits
     masked_vals = jnp.where(valid_mask, sim_values, -jnp.inf)
     order = jnp.argsort(masked_vals)[::-1]  # descending
