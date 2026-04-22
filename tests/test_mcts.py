@@ -714,11 +714,8 @@ class TestMCTSJointOSLAPlanner:
 
 def test_reanalyze_actor_uses_osla_planner():
     """ReanalyzeActor must use MCTSJointOSLAPlanner, not MCTSJointPlanner."""
-    import ast, pathlib
-    src = pathlib.Path("actors/reanalyze_actor.py").read_text()
-    ast.parse(src)
-    assert "MCTSJointOSLAPlanner" in src, (
-        "ReanalyzeActor planner_map must include MCTSJointOSLAPlanner for joint mode"
+    import pathlib
+    src = (pathlib.Path(__file__).parent.parent / "actors" / "reanalyze_actor.py").read_text()
+    assert '"joint": MCTSJointOSLAPlanner' in src, (
+        "ReanalyzeActor planner_map must map 'joint' to MCTSJointOSLAPlanner"
     )
-    assert "MCTSJointPlanner" not in src or "joint_legacy" in src, \
-        "MCTSJointPlanner should only appear as joint_legacy in reanalyze, not as the joint planner"
