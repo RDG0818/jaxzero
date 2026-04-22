@@ -4,11 +4,38 @@ import time
 import numpy as np
 
 import ray
+import jax as _jax
 
 from config import ExperimentConfig
 from utils.logging_utils import logger
 from utils.obs_norm import ObsRunningNorm
 from utils.profiler import Profiler
+
+
+# ─── Gradient scaling utilities ────────────────────────────────────────────────
+
+
+@_jax.custom_vjp
+def scale_grad_half(x):
+    """Identity in forward pass; halves gradients in backward pass.
+
+    Used to prevent dynamics-network updates from dominating representation
+    gradients over long unrolls (MuZero paper §E, MAZero Appendix).
+    """
+    return x
+
+
+def _scale_grad_half_fwd(x):
+    """Forward pass: identity."""
+    return x, ()
+
+
+def _scale_grad_half_bwd(_, g):
+    """Backward pass: halve the gradient."""
+    return (_jax.tree_util.tree_map(lambda gi: gi * 0.5, g),)
+
+
+scale_grad_half.defvjp(_scale_grad_half_fwd, _scale_grad_half_bwd)
 
 
 def make_train_step(model, optimizer, value_support, reward_support, config: ExperimentConfig):
@@ -82,6 +109,8 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
             # (h_t, h_{t+k}) for k>1 can reuse the same hidden states.
             def scan_step(hidden, inputs):
                 ai, ri_dist, pi_target, vi_dist, step_key = inputs
+
+                hidden = scale_grad_half(hidden)  # half-gradient on hidden states (MuZero paper §E)
 
                 out = model.apply(
                     {"params": p}, hidden, ai,
