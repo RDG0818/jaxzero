@@ -536,6 +536,7 @@ class TestOSLAHelpers:
         """OSLATree, SimCarry, SelectCarry must be registered as JAX pytrees."""
         from mcts.mcts_joint_osla import OSLATree, SimCarry, SelectCarry
         # chex.dataclass auto-registers as pytree; verify leaves/treedef work
+        max_sims_slots = 9  # dummy size for test
         tree = OSLATree(
             visit_counts=jnp.zeros(5, jnp.int32),
             value_sum=jnp.zeros(5),
@@ -546,9 +547,11 @@ class TestOSLAHelpers:
             child_actions=jnp.zeros((5, 4), jnp.int32),
             child_node_idx=jnp.full((5, 4), -1, jnp.int32),
             child_prior_prob=jnp.zeros((5, 4)),
+            node_sim_values=jnp.zeros((5, max_sims_slots)),
+            node_sim_depths=jnp.zeros((5, max_sims_slots), jnp.int32),
         )
         leaves, treedef = jax.tree_util.tree_flatten(tree)
-        assert len(leaves) == 9  # 9 fields
+        assert len(leaves) == 11  # 9 original + 2 new fields
         tree2 = treedef.unflatten(leaves)
         assert jnp.array_equal(tree2.visit_counts, tree.visit_counts)
 
@@ -629,6 +632,8 @@ class TestRunSingleSimBackup:
             child_actions=jnp.zeros((max_nodes, K), jnp.int32).at[0].set(child_actions),
             child_node_idx=jnp.full((max_nodes, K), -1, jnp.int32),
             child_prior_prob=jnp.zeros((max_nodes, K)).at[0].set(child_probs),
+            node_sim_values=jnp.zeros((max_nodes, 9)),   # small for test
+            node_sim_depths=jnp.zeros((max_nodes, 9), jnp.int32),
         )
         carry = SimCarry(
             tree=tree,
@@ -639,7 +644,7 @@ class TestRunSingleSimBackup:
         )
 
         fake_rf = self._make_fake_recurrent_fn(r, v, A_N, N, D)
-        result = _run_single_sim(carry, jnp.array(0), None, fake_rf, K, A_N, max_depth, gamma)
+        result = _run_single_sim(carry, jnp.array(0), None, fake_rf, K, A_N, max_depth, gamma, rho=0.25, lam=0.8)
 
         # Root backup value = r + gamma * v
         expected_root_val = r + gamma * v
@@ -719,3 +724,55 @@ def test_reanalyze_actor_uses_osla_planner():
     assert '"joint": MCTSJointOSLAPlanner' in src, (
         "ReanalyzeActor planner_map must map 'joint' to MCTSJointOSLAPlanner"
     )
+
+
+class TestComputeOslaValueJax:
+
+    def test_matches_python_version(self):
+        """JAX-native compute_osla_value_jax should match Python compute_osla_value."""
+        from mcts.mcts_joint_osla import compute_osla_value, compute_osla_value_jax
+        rng = np.random.default_rng(0)
+        K = 10
+        depths = np.array([1, 2, 3, 1, 2, 4, 1, 2, 3, 4], dtype=np.int32)
+        values = rng.uniform(0, 2, K).astype(np.float32)
+        py_result = float(compute_osla_value(
+            jnp.array(depths), jnp.array(values), rho=0.25, lam=0.8
+        ))
+        jax_result = float(compute_osla_value_jax(
+            jnp.array(values), jnp.array(depths), jnp.array(K, jnp.int32), 0.25, 0.8
+        ))
+        assert abs(py_result - jax_result) < 1e-4, f"py={py_result} jax={jax_result}"
+
+    def test_partial_fill(self):
+        """compute_osla_value_jax with n_visits < max_sims ignores padding zeros."""
+        from mcts.mcts_joint_osla import compute_osla_value_jax
+        values = jnp.array([1.0, 0.5, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        depths = jnp.array([1, 2, 1, 0, 0, 0, 0, 0, 0, 0], dtype=jnp.int32)
+        n_visits = jnp.array(3, jnp.int32)
+        result = float(compute_osla_value_jax(values, depths, n_visits, 0.25, 0.8))
+        # rho=0.25 → keep top 75% = floor(0.75*3)=2 sims
+        # sorted descending by value: 1.0(d=1), 0.8(d=1), 0.5(d=2)
+        # top 2: values=[1.0,0.8], depths=[1,1]
+        w = 0.8 ** jnp.array([1, 1], dtype=jnp.float32)
+        top_vals = jnp.array([1.0, 0.8])
+        expected = float((top_vals * w).sum() / w.sum())
+        assert abs(result - expected) < 1e-4, f"expected {expected}, got {result}"
+
+
+class TestPerNodeOsla:
+
+    def test_oslatree_has_node_sim_fields(self):
+        """OSLATree must have node_sim_values and node_sim_depths fields."""
+        from mcts.mcts_joint_osla import OSLATree
+        field_names = {f.name for f in dataclasses.fields(OSLATree)}
+        assert "node_sim_values" in field_names, "OSLATree missing node_sim_values"
+        assert "node_sim_depths" in field_names, "OSLATree missing node_sim_depths"
+
+    def test_plan_output_shape_unchanged(self, osla_plan_fn, params, obs):
+        """Plan output shapes must be unchanged after adding per-node tracking."""
+        plan_fn, _ = osla_plan_fn
+        out = plan_fn(params, jax.random.PRNGKey(0), obs)
+        assert out.joint_action.shape == (1, N)
+        assert out.policy_targets.shape == (1, N, A)
+        assert out.root_value.shape == (1,)
+        assert jnp.isfinite(out.root_value).all()

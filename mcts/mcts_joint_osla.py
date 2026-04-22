@@ -42,6 +42,34 @@ def compute_osla_value(
     return (top_values * weights).sum() / (weights.sum() + 1e-8)
 
 
+def compute_osla_value_jax(
+    sim_values: chex.Array,   # [max_sims] float32 — padded with 0 after n_visits
+    sim_depths: chex.Array,   # [max_sims] int32 — node-to-leaf depth per sim
+    n_visits: chex.Array,     # scalar int32 — number of valid entries
+    rho: float,
+    lam: float,
+) -> chex.Array:
+    """JAX-native OS(λ) for use inside jax.lax loops and jax.vmap.
+
+    Fixed-size arrays with validity mask — works inside JAX-traced functions.
+    """
+    max_sims = sim_values.shape[0]
+    k_top = jnp.maximum(
+        1,
+        jnp.floor((1.0 - rho) * n_visits.astype(jnp.float32)).astype(jnp.int32),
+    )
+    valid_mask = jnp.arange(max_sims) < n_visits
+    masked_vals = jnp.where(valid_mask, sim_values, -jnp.inf)
+    order = jnp.argsort(masked_vals)[::-1]  # descending
+    sorted_vals = sim_values[order]
+    sorted_depths = sim_depths[order]
+    sorted_valid = valid_mask[order]
+    rank = jnp.arange(max_sims)
+    include = (rank < k_top) & sorted_valid
+    weights = jnp.where(include, lam ** sorted_depths.astype(jnp.float32), 0.0)
+    return (sorted_vals * weights).sum() / (weights.sum() + 1e-8)
+
+
 # ─── Tree data structure ──────────────────────────────────────────────────────
 
 @chex.dataclass
@@ -60,6 +88,9 @@ class OSLATree:
     child_actions:    chex.Array  # [max_nodes, K] int32 — flat joint action indices
     child_node_idx:   chex.Array  # [max_nodes, K] int32 (-1 = not yet expanded)
     child_prior_prob: chex.Array  # [max_nodes, K] float32
+    # Per-node simulation data for OS(λ) UCB selection
+    node_sim_values:  chex.Array  # [max_nodes, num_sims+1] float32
+    node_sim_depths:  chex.Array  # [max_nodes, num_sims+1] int32
 
 
 @chex.dataclass
@@ -75,13 +106,14 @@ class SimCarry:
 @chex.dataclass
 class SelectCarry:
     """Inner while_loop state during tree selection."""
-    node_idx:     chex.Array  # [] int32 — current node
-    depth:        chex.Array  # [] int32
-    path_nodes:   chex.Array  # [max_depth+1] int32
-    path_k:       chex.Array  # [max_depth+1] int32
-    path_rewards: chex.Array  # [max_depth+1] float32 — reward[path_nodes[i]]
-    best_k:       chex.Array  # [] int32 — UCB-best child of current node
-    child_idx:    chex.Array  # [] int32 — child_node_idx[node, best_k]
+    node_idx:         chex.Array  # [] int32 — current node
+    depth:            chex.Array  # [] int32
+    path_nodes:       chex.Array  # [max_depth+1] int32
+    path_k:           chex.Array  # [max_depth+1] int32
+    path_rewards:     chex.Array  # [max_depth+1] float32 — reward[path_nodes[i]]
+    best_k:           chex.Array  # [] int32 — UCB-best child of current node
+    child_idx:        chex.Array  # [] int32 — child_node_idx[node, best_k]
+    osla_node_values: chex.Array  # [max_nodes] float32 — precomputed OS(λ) per node
 
 
 # ─── UCB helper ───────────────────────────────────────────────────────────────
@@ -125,13 +157,22 @@ def _run_single_sim(
     max_depth: int,               # static
     gamma: float,
     c_puct: float = 1.25,
+    rho: float = 0.75,
+    lam: float = 0.8,
 ) -> SimCarry:
     """Run one MCTS simulation: selection → expansion → backup → record (depth, value)."""
     tree = carry.tree
     rng, expand_rng = jax.random.split(carry.rng)
 
+    # ── 0. Precompute OS(λ) value estimates for all nodes ────────────────────
+    osla_node_values = jax.vmap(
+        lambda vals, deps, nv: compute_osla_value_jax(vals, deps, nv, rho, lam),
+        in_axes=(0, 0, 0),
+    )(tree.node_sim_values, tree.node_sim_depths, tree.visit_counts)
+    # shape: [max_nodes] float32
+
     # ── 1. Helper: best UCB child index for a given node ─────────────────────
-    def _best_ucb(node_idx):
+    def _best_ucb(node_idx, osla_vals):
         child_node_idxs = tree.child_node_idx[node_idx]   # [K]
         # For unvisited children (idx=-1), treat as node 0 (safe gather) but with 0 visits
         safe_idxs = jnp.maximum(child_node_idxs, 0)
@@ -140,9 +181,10 @@ def _run_single_sim(
             tree.visit_counts[safe_idxs].astype(jnp.float32),
             0.0,
         )
+        # OS(λ) Q-value: R(child) + γ * V_osla(child)
         child_q = jnp.where(
             child_node_idxs >= 0,
-            tree.reward[safe_idxs] + gamma * tree.value_sum[safe_idxs] / jnp.maximum(child_visits, 1.0),
+            tree.reward[safe_idxs] + gamma * osla_vals[safe_idxs],
             0.0,
         )
         prior_probs = tree.child_prior_prob[node_idx]
@@ -151,7 +193,7 @@ def _run_single_sim(
         return jnp.argmax(ucb).astype(jnp.int32)
 
     # ── 2. Selection via while_loop ───────────────────────────────────────────
-    init_bk = _best_ucb(jnp.array(0, jnp.int32))
+    init_bk = _best_ucb(jnp.array(0, jnp.int32), osla_node_values)
     init_cidx = tree.child_node_idx[0, init_bk]
 
     init_sc = SelectCarry(
@@ -162,6 +204,7 @@ def _run_single_sim(
         path_rewards=jnp.zeros(max_depth + 1, jnp.float32),
         best_k=init_bk,
         child_idx=init_cidx,
+        osla_node_values=osla_node_values,
     )
 
     def _select_cond(sc: SelectCarry) -> bool:
@@ -174,7 +217,7 @@ def _run_single_sim(
         child_reward = tree.reward[sc.child_idx]
         path_rewards = sc.path_rewards.at[sc.depth + 1].set(child_reward)
         # Move to child, compute its best UCB child
-        new_bk = _best_ucb(sc.child_idx)
+        new_bk = _best_ucb(sc.child_idx, sc.osla_node_values)
         new_cidx = tree.child_node_idx[sc.child_idx, new_bk]
         return SelectCarry(
             node_idx=sc.child_idx,
@@ -184,6 +227,7 @@ def _run_single_sim(
             path_rewards=path_rewards,
             best_k=new_bk,
             child_idx=new_cidx,
+            osla_node_values=sc.osla_node_values,
         )
 
     sc = jax.lax.while_loop(_select_cond, _select_body, init_sc)
@@ -250,9 +294,21 @@ def _run_single_sim(
         i = leaf_depth - k   # depth index: leaf_depth, leaf_depth-1, ..., 0
         valid = k <= leaf_depth
         node_i = jnp.where(valid, path_nodes[i], 0)  # safe index (0 when invalid)
+
+        # Use pre-increment visit count as the slot index for this simulation
+        write_slot = btree.visit_counts[node_i]  # scalar int32
+
         new_vc = btree.visit_counts.at[node_i].add(jnp.where(valid, 1, 0))
         new_vs = btree.value_sum.at[node_i].add(jnp.where(valid, V, 0.0))
-        btree = btree.replace(visit_counts=new_vc, value_sum=new_vs)
+
+        # k = node-to-leaf depth (0 at leaf, increases toward root) — matches MAZero convention
+        new_nsv = btree.node_sim_values.at[node_i, write_slot].set(jnp.where(valid, V, 0.0))
+        new_nsd = btree.node_sim_depths.at[node_i, write_slot].set(jnp.where(valid, k, 0))
+
+        btree = btree.replace(
+            visit_counts=new_vc, value_sum=new_vs,
+            node_sim_values=new_nsv, node_sim_depths=new_nsd,
+        )
         # V for next (shallower) node: V_parent = reward_into_current + gamma * V_current
         r_i = path_rewards[jnp.maximum(i, 0)]
         V_new = r_i + gamma * V
@@ -370,6 +426,8 @@ def _osla_plan_single(
         child_actions=jnp.zeros((max_nodes, K), jnp.int32).at[0].set(root_child_actions),
         child_node_idx=jnp.full((max_nodes, K), -1, jnp.int32),
         child_prior_prob=jnp.zeros((max_nodes, K), jnp.float32).at[0].set(root_child_probs),
+        node_sim_values=jnp.zeros((max_nodes, num_simulations + 1), jnp.float32),
+        node_sim_depths=jnp.zeros((max_nodes, num_simulations + 1), jnp.int32),
     )
 
     init_carry = SimCarry(
@@ -413,7 +471,7 @@ def _osla_plan_single(
     def sim_step(sim_idx, carry: SimCarry) -> SimCarry:
         return _run_single_sim(
             carry, sim_idx, params, recurrent_fn_batched,
-            K, A_N, max_depth, gamma, c_puct,
+            K, A_N, max_depth, gamma, c_puct, rho, lam,
         )
 
     final_carry = jax.lax.fori_loop(0, num_simulations, sim_step, init_carry)
