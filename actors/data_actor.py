@@ -9,7 +9,7 @@ from utils.logging_utils import logger
 from utils.profiler import Profiler
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=2)
 class DataActor:
     """
     Generates experience on CPU via MCTS planning.
@@ -33,6 +33,17 @@ class DataActor:
         # never allocates GPU memory.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["JAX_PLATFORMS"] = "cpu"
+
+        # Limit XLA/BLAS thread pool per actor. Without this, each JAX process
+        # tries to use all CPU cores. With N actors all doing this, they thrash
+        # each other (N × all_cores threads on all_cores physical cores).
+        # 2 threads per actor matches @ray.remote(num_cpus=2) above.
+        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+        os.environ.setdefault("MKL_NUM_THREADS", "2")
+        os.environ.setdefault("XLA_FLAGS",
+            (os.environ.get("XLA_FLAGS", "") + " --xla_cpu_multi_thread_eigen=false").strip()
+        )
 
         import jax
         from model import FlaxMAMuZeroNet

@@ -8,7 +8,7 @@ from utils.logging_utils import logger
 from utils.profiler import Profiler
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=2)
 class ReanalyzeActor:
     """
     Re-runs MCTS on stored observations using the latest model params to
@@ -30,6 +30,14 @@ class ReanalyzeActor:
     ):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["JAX_PLATFORMS"] = "cpu"
+
+        # Match DataActor: limit XLA/BLAS threads to avoid thrashing with other actors.
+        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+        os.environ.setdefault("MKL_NUM_THREADS", "2")
+        os.environ.setdefault("XLA_FLAGS",
+            (os.environ.get("XLA_FLAGS", "") + " --xla_cpu_multi_thread_eigen=false").strip()
+        )
 
         import jax
         from model import FlaxMAMuZeroNet
