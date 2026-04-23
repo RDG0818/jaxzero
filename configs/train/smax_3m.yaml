@@ -1,7 +1,8 @@
 # SMAX 3m scenario: 3 allies vs 3 scripted marine enemies.
-# Usage: python train/muzero.py train=smax_3m
+# Usage: python train/muzero.py train=smax_3m model=smax mcts=joint
 #
 # Hyperparameters aligned with MaZero paper (SMAC settings).
+# model=smax selects deeper nets, 3-head attention, and tight value support.
 #
 # Other common scenarios:
 #   8m:    num_agents=8,  max_episode_steps=120
