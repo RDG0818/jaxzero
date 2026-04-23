@@ -273,11 +273,15 @@ class LearnerActor:
         self.obs_norm = ObsRunningNorm(obs_size) if self._use_obs_norm else None
 
         lr = config.train.learning_rate
+        # Clamp warmup so short diagnostic runs (num_episodes=300) don't produce
+        # a negative decay_steps and crash cosine_decay_schedule.
+        _warmup = min(config.train.lr_warmup_steps, config.train.num_episodes // 2)
+        _decay  = max(1, config.train.num_episodes - _warmup)
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=lr,
-            warmup_steps=config.train.lr_warmup_steps,
-            decay_steps=config.train.num_episodes - config.train.lr_warmup_steps,
+            warmup_steps=_warmup,
+            decay_steps=_decay,
             end_value=lr * config.train.end_lr_factor,
         )
         optimizer = optax.chain(

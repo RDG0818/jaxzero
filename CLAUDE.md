@@ -2,6 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
+## Target System
+
+- **GPU**: NVIDIA GeForce RTX 3060 Ti, 8 GiB VRAM
+- **CPU**: 12 cores
+- **RAM**: 23 GiB
+- **OS**: WSL2 (Ubuntu on Windows 11), accessed via SSH → Windows Terminal → WSL
+- **CUDA driver**: 591.86 (WSL2 passthrough; JAX sees `CudaDevice(id=0)` correctly)
+
+## Current Training Target
+
+Primary scenario: **SMAX 3m** (3 allies vs 3 scripted marines, JaxMARL HeuristicEnemySMAX).
+
+```bash
+python train/muzero.py train=smax_3m model=smax mcts=joint
+```
+
+Key config group files:
+- `configs/train/smax_3m.yaml` — episode/buffer/actor counts
+- `configs/model/smax.yaml` — 2-layer [128,128] nets, 3-layer 8-head attention, value support [-5,5]
+- `configs/mcts/joint.yaml` — MCTSJointOSLAPlanner, 50 sims, rho=0.25, K=5
+
+Resource layout on the 12-core machine (each CPU actor claims `num_cpus=2` and sets `OMP_NUM_THREADS=2`):
+- 3 DataActors × 2 CPUs = 6 CPUs
+- 1 ReanalyzeActor × 2 CPUs = 2 CPUs
+- ~4 CPUs left for OS / LearnerActor dispatch / ReplayBufferActor
+
 ## Commands
 
 ```bash
@@ -88,7 +114,8 @@ model/
 mcts/
   base.py                 # MCTSPlanner base class, MCTSPlanOutput
   mcts_independent.py     # MCTSIndependentPlanner
-  mcts_joint.py           # MCTSJointPlanner
+  mcts_joint.py           # MCTSJointPlanner (legacy mctx-based; used as joint_legacy)
+  mcts_joint_osla.py      # MCTSJointOSLAPlanner — custom JAX MCTS with OS(λ) per-node backup
 envs/
   mpe_env_wrapper.py      # MPEEnvWrapper + VecMPEEnvWrapper (JaxMARL MPE)
   smax_env_wrapper.py     # stub for future SMAC wrapper
@@ -122,9 +149,9 @@ tests/
 
 **MCTS planners** (`mcts/`):
 - `MCTSPlanner` (base): common config, `DiscreteSupport` objects, Dirichlet noise. Public entry point: `planner.plan(params, rng_key, obs)`.
-- `MCTSIndependentPlanner`: one `gumbel_muzero_policy` search per agent via `jax.lax.scan`; other agents fixed to prior argmax during each agent's search.
-- `MCTSJointPlanner`: single search over the combinatorial joint action space `A^N` with independence-factored logits; marginal policy targets extracted by summing over other agents' axes.
-- All planners use `mctx.gumbel_muzero_policy` from DeepMind's MCTX library.
+- `MCTSIndependentPlanner`: one `gumbel_muzero_policy` search per agent via `jax.lax.scan`; other agents fixed to prior argmax during each agent's search. Uses mctx.
+- `MCTSJointPlanner` (`joint_legacy`): single search over `A^N` joint space with mctx. Mean backup. Kept for ablations.
+- `MCTSJointOSLAPlanner` (`joint`, default for SMAX): custom JAX MCTS (not mctx). Per-node OS(λ) backup — each node tracks per-simulation values/depths; UCB selection uses OS(λ)-estimated Q-values (top (1-rho) quantile weighted by λ^depth). Vmapped over B environments; `jax.lax.fori_loop` over simulations. Matches MAZero algorithm exactly.
 
 **Data flow**: `observation (B,N,obs_dim)` → representation → latent `(B,N,D)` → MCTS (calls `recurrent_inference` inside simulations) → `MCTSPlanOutput` → `Transition` → `Episode` → `process_episode` (n-step returns) → `ReplayItem` → `ReplayBuffer`.
 
@@ -194,5 +221,7 @@ Collected from the refactor session. Items marked **[easy]** are straightforward
 - **[easy] Increase `batch_size`** — larger batches amortize Ray scheduling overhead (~100ms/call) by doing more GPU work per step. Try 512 or 1024.
 - **[done] Single D2H transfer** — `make_train_step` packs metrics + priorities into one contiguous JAX array; `_train_step` does one `np.array()` call and slices. Eliminated ~18ms/step of PCIe per-scalar overhead.
 - **[done] C++ replay buffer with pinned memory** — see Utils above.
+- **[done] Thread affinity for CPU actors** — each DataActor/ReanalyzeActor sets `OMP_NUM_THREADS=2` + `--xla_cpu_multi_thread_eigen=false` before JAX import. Without this, all actors fight for all 12 cores (N×12 threads on 12 cores). Also `@ray.remote(num_cpus=2)` so Ray scheduling matches actual usage.
+- **[done] More DataActors (3)** — `num_actors=3` fills the buffer fast enough for `batch_size=2048`; learner no longer data-starved.
 - **[note] More DataActors** — GPU learner was underutilized due to Ray round-trip overhead (now fixed with self-driving loop) and slow param sync (now async). Adding more actors still helps data throughput but is no longer the primary bottleneck.
 - **[note] Candidate libraries** — `rlax` could replace `utils/transforms.py` entirely (`transform_to_2hot`/`from_2hot` = `scalar_to_support`/`support_to_scalar`; `signed_hyperbolic`/`signed_parabolic` = `muzero_scale`/`inv`) and simplify baseline GAE/PPO. `flashbax` is suitable for a future pure-JAX training path (keeps buffer on GPU). `jaxtyping` + `beartype` for runtime shape checking during development.
