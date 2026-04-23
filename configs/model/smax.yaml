@@ -1,9 +1,8 @@
 # Model config tuned for JaxMARL SMAX environments.
-# Matches MAZero paper SMAC architecture: deeper networks, 3-head attention,
+# Matches MAZero paper SMAC architecture: deeper networks, 3-layer 8-head attention,
 # tighter value/reward support for sparse win/loss rewards.
 #
-# Usage: python train/muzero.py train=smax_3m mcts=joint
-#   (smax_3m.yaml selects this model config automatically via override /model: smax)
+# Usage: python train/muzero.py train=smax_3m model=smax mcts=joint
 
 defaults:
   - default
@@ -17,9 +16,10 @@ value_support_size: 5   # DiscreteSupport(-5, 5) = 11 bins — matches MAZero SM
 fc_representation_layers: [128, 128]
 fc_dynamic_layers: [128, 128]
 
-# 3-head attention matches MAZero's AttentionEncoder(3, ...) for richer
-# inter-agent coordination signals in the dynamics network.
-attention_heads: 3
+# MAZero uses AttentionEncoder(n_layers=3, nhead=8) — 3 encoder layers, 8 heads.
+# 128 / 8 = 16 features per head (128 % 8 == 0, so this works).
+attention_layers: 3
+attention_heads: 8
 
 # Smaller projection network matches MAZero SMAC (proj_hid=128, proj_out=128).
 proj_hid: 128
