@@ -27,12 +27,15 @@ class DataActor:
         replay_buffer_actor,
         config: ExperimentConfig,
     ):
-        # Ray sets CUDA_VISIBLE_DEVICES="" for CPU workers, causing the JAX
-        # CUDA plugin to crash on cuInit(0). Pop the restriction so the device
-        # is visible (cuInit succeeds), then set JAX_PLATFORMS=cpu so JAX
-        # never allocates GPU memory.
+        # Ray sets CUDA_VISIBLE_DEVICES="" for CPU workers, causing the JAX CUDA
+        # plugin to crash on cuInit(0). Pop the restriction so the GPU is visible.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        os.environ["JAX_PLATFORMS"] = "cpu"
+
+        # Don't preallocate GPU memory at JAX init — the learner and multiple data
+        # actors share one GPU. With preallocation on, each process reserves a fixed
+        # fraction (default 75%) at startup, causing OOM before any computation runs.
+        # With it off, JAX allocates on demand up to the physical limit.
+        os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
         # Limit XLA/BLAS thread pool per actor. Without this, each JAX process
         # tries to use all CPU cores. With N actors all doing this, they thrash
@@ -46,6 +49,31 @@ class DataActor:
         )
 
         import jax
+        try:
+            devices = jax.devices()
+            logger.info(f"(DataActor {actor_id} pid={os.getpid()}) JAX devices: {devices}")
+            gpu_devices = [d for d in devices if "gpu" in str(d).lower() or "cuda" in str(d).lower()]
+            if gpu_devices:
+                logger.info(f"(DataActor {actor_id}) Using GPU: {gpu_devices[0]}")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        logger.info(f"(DataActor {actor_id}) GPU memory (used/free/total MiB): {result.stdout.strip()}")
+                except Exception as e:
+                    logger.warning(f"(DataActor {actor_id}) Could not query GPU memory: {e}")
+            else:
+                logger.warning(
+                    f"(DataActor {actor_id}) No GPU found — falling back to CPU. "
+                    f"MCTS will be slow. Devices: {devices}"
+                )
+        except Exception as e:
+            logger.error(f"(DataActor {actor_id}) JAX device init failed: {e}")
+            raise
         from model import FlaxMAMuZeroNet
         from mcts import MCTSIndependentPlanner, MCTSJointPlanner, MCTSJointOSLAPlanner
         from envs import make_vec_env_wrapper

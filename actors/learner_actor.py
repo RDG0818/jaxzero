@@ -236,6 +236,11 @@ class LearnerActor:
     """
 
     def __init__(self, obs_size: int, action_size: int, replay_buffer_actor, config: ExperimentConfig):
+        # Don't preallocate the full MEM_FRACTION at init — data actors share
+        # the same GPU. With preallocation, this process would claim 5.6 GB on
+        # an 8 GB card before any data actor has started, leaving no room for them.
+        # With it off, JAX allocates on demand and MEM_FRACTION acts as an upper cap.
+        os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.70"
         os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
         os.environ["GLOG_minloglevel"] = "2"
@@ -249,6 +254,27 @@ class LearnerActor:
         from model import FlaxMAMuZeroNet
 
         self.config = config
+        try:
+            devices = jax.devices()
+            gpu_devices = [d for d in devices if "gpu" in str(d).lower() or "cuda" in str(d).lower()]
+            if gpu_devices:
+                logger.info(f"(Learner pid={os.getpid()}) JAX devices: {devices} — using {gpu_devices[0]}")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        logger.info(f"(Learner) GPU memory at init (used/free/total MiB): {result.stdout.strip()}")
+                except Exception as e:
+                    logger.warning(f"(Learner) Could not query GPU memory: {e}")
+            else:
+                logger.warning(f"(Learner pid={os.getpid()}) No GPU found! Training will be slow. Devices: {devices}")
+        except Exception as e:
+            logger.error(f"(Learner) JAX device init failed: {e}")
+            raise
         logger.info(f"(Learner pid={os.getpid()}) Initializing on GPU...")
 
         self.replay_buffer = replay_buffer_actor

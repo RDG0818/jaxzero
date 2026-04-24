@@ -29,7 +29,10 @@ class ReanalyzeActor:
         config: ExperimentConfig,
     ):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        os.environ["JAX_PLATFORMS"] = "cpu"
+
+        # Same as DataActor: don't preallocate GPU memory so multiple JAX processes
+        # can share the single GPU without OOM at init time.
+        os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
         # Match DataActor: limit XLA/BLAS threads to avoid thrashing with other actors.
         os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -40,6 +43,31 @@ class ReanalyzeActor:
         )
 
         import jax
+        try:
+            devices = jax.devices()
+            logger.info(f"(ReanalyzeActor {actor_id} pid={os.getpid()}) JAX devices: {devices}")
+            gpu_devices = [d for d in devices if "gpu" in str(d).lower() or "cuda" in str(d).lower()]
+            if gpu_devices:
+                logger.info(f"(ReanalyzeActor {actor_id}) Using GPU: {gpu_devices[0]}")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        logger.info(f"(ReanalyzeActor {actor_id}) GPU memory (used/free/total MiB): {result.stdout.strip()}")
+                except Exception as e:
+                    logger.warning(f"(ReanalyzeActor {actor_id}) Could not query GPU memory: {e}")
+            else:
+                logger.warning(
+                    f"(ReanalyzeActor {actor_id}) No GPU found — falling back to CPU. "
+                    f"MCTS will be slow. Devices: {devices}"
+                )
+        except Exception as e:
+            logger.error(f"(ReanalyzeActor {actor_id}) JAX device init failed: {e}")
+            raise
         from model import FlaxMAMuZeroNet
         from mcts import MCTSIndependentPlanner, MCTSJointPlanner, MCTSJointOSLAPlanner
 
