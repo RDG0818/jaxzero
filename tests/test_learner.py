@@ -29,3 +29,51 @@ def test_scale_grad_half_backward_halves_gradient():
     grad_fn = jax.grad(lambda v: scale_grad_half(v).sum())
     g = grad_fn(x)
     assert jnp.allclose(g, jnp.full_like(x, 0.5)), f"expected 0.5 everywhere, got {g}"
+
+
+def test_action_level_awpo_upweights_high_q_actions():
+    """Actions with Q > V_root should get higher AWPO weight than low-Q actions."""
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ["JAX_PLATFORMS"] = "cpu"
+
+    B, K = 2, 5
+    v_root = jnp.array([0.5, 0.5])  # (B,)
+    # Batch 0: action 0 is good (Q=1.0 → adv=+0.5), action 1 is bad (Q=0.0 → adv=-0.5)
+    q_k = jnp.array([
+        [1.0, 0.0, 0.5, 0.5, 0.5],
+        [0.8, 0.2, 0.5, 0.5, 0.5],
+    ])  # (B, K)
+    alpha = 1.0
+
+    action_adv = jnp.clip((q_k - v_root[:, None]) / alpha, -5.0, 5.0)
+    awpo_w_k = jnp.exp(action_adv)
+
+    assert awpo_w_k[0, 0] > awpo_w_k[0, 1], "High-Q action should have higher AWPO weight"
+    assert float(awpo_w_k[0, 0]) > 1.0, "Positive-advantage action should have weight > 1"
+    assert float(awpo_w_k[0, 1]) < 1.0, "Negative-advantage action should have weight < 1"
+
+
+def test_action_level_awpo_joint_log_prob_sums_over_agents():
+    """Joint log-prob of a sampled action should be the sum of per-agent log-probs."""
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ["JAX_PLATFORMS"] = "cpu"
+
+    B, K, N, A = 2, 5, 3, 9
+    rng = jax.random.PRNGKey(42)
+    policy_logits = jax.random.normal(rng, (B, N, A))
+    log_probs = jax.nn.log_softmax(policy_logits, axis=-1)  # (B, N, A)
+
+    # All agents pick action 0 for all K samples
+    child_actions = jnp.zeros((B, K, N), dtype=jnp.int32)
+
+    log_probs_exp = jnp.broadcast_to(log_probs[:, None, :, :], (B, K, N, A))
+    gathered = jnp.take_along_axis(
+        log_probs_exp,
+        child_actions[:, :, :, None],
+        axis=-1,
+    ).squeeze(-1)  # (B, K, N)
+    joint_log_prob_k = gathered.sum(axis=-1)  # (B, K)
+
+    # Manual check: joint log-prob = sum of per-agent log_prob(action=0)
+    expected = log_probs[:, :, 0].sum(axis=-1, keepdims=True)  # (B, 1)
+    assert jnp.allclose(joint_log_prob_k, jnp.broadcast_to(expected, (B, K)), atol=1e-5)

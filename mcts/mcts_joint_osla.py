@@ -487,11 +487,37 @@ def _osla_plan_single(
 
     # ── Policy target from root child visit counts ────────────────────────────
     root_children = final_carry.tree.child_node_idx[0]  # [K]
+    safe_root_children = jnp.maximum(root_children, 0)
     root_child_visits = jnp.where(
         root_children >= 0,
-        final_carry.tree.visit_counts[jnp.maximum(root_children, 0)].astype(jnp.float32),
+        final_carry.tree.visit_counts[safe_root_children].astype(jnp.float32),
         0.0,
     )  # [K]
+
+    # ── Per-child Q-values for action-level AWPO ──────────────────────────────
+    # Q_k = reward_into_child + gamma * OS(λ)_value(child)
+    # Used in the learner to compute per-action advantages instead of state-level.
+    child_osla_v = jax.vmap(
+        lambda v, d, n: compute_osla_value_jax(v, d, n, rho, lam)
+    )(
+        final_carry.tree.node_sim_values[safe_root_children],  # [K, num_sims+1]
+        final_carry.tree.node_sim_depths[safe_root_children],  # [K, num_sims+1]
+        jnp.where(
+            root_children >= 0,
+            final_carry.tree.visit_counts[safe_root_children],
+            jnp.zeros(K, jnp.int32),
+        ),
+    )  # [K]
+    child_q = jnp.where(
+        root_children >= 0,
+        final_carry.tree.reward[safe_root_children] + gamma * child_osla_v,
+        0.0,
+    )  # [K] — Q-value for each sampled root child (0 if unvisited)
+
+    # Decode flat joint actions → per-agent indices: (K,) → (K, N)
+    root_child_actions_per_agent = jnp.stack(
+        jnp.unravel_index(root_child_actions, joint_action_shape), axis=-1
+    )  # (K, N)
 
     # Build sparse joint distribution over A_N actions
     joint_visits = jnp.zeros(A_N).at[root_child_actions].add(root_child_visits)
@@ -510,10 +536,13 @@ def _osla_plan_single(
     )  # (N,)
 
     return MCTSPlanOutput(
-        joint_action=best_action[None],         # (1, N)
-        policy_targets=marginal_policy,          # (1, N, A)
-        root_value=osla_root_value[None],        # (1,)
+        joint_action=best_action[None],                              # (1, N)
+        policy_targets=marginal_policy,                              # (1, N, A)
+        root_value=osla_root_value[None],                           # (1,)
         agent_order=jnp.arange(N),
+        root_child_actions=root_child_actions_per_agent[None],      # (1, K, N)
+        root_child_q=child_q[None],                                  # (1, K)
+        root_child_visits=root_child_visits[None],                   # (1, K)
     )
 
 
@@ -572,8 +601,11 @@ class MCTSJointOSLAPlanner(MCTSPlanner):
 
         # vmap produces leading B dim; _osla_plan_single adds an extra 1 dim — squeeze it
         return MCTSPlanOutput(
-            joint_action=results.joint_action.squeeze(1),      # (B, N)
-            policy_targets=results.policy_targets.squeeze(1),  # (B, N, A)
-            root_value=results.root_value.squeeze(1),          # (B,)
-            agent_order=results.agent_order[0],                 # (N,) — same for all
+            joint_action=results.joint_action.squeeze(1),              # (B, N)
+            policy_targets=results.policy_targets.squeeze(1),          # (B, N, A)
+            root_value=results.root_value.squeeze(1),                  # (B,)
+            agent_order=results.agent_order[0],                         # (N,) — same for all
+            root_child_actions=results.root_child_actions.squeeze(1),  # (B, K, N)
+            root_child_q=results.root_child_q.squeeze(1),              # (B, K)
+            root_child_visits=results.root_child_visits.squeeze(1),    # (B, K)
         )

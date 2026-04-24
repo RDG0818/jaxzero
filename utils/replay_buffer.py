@@ -17,6 +17,10 @@ class Transition:
     policy_target: np.ndarray
     value_target: float
     agent_order: np.ndarray
+    # Per-root-child Q-data for action-level AWPO (None for non-OSLA planners)
+    root_child_actions: np.ndarray = None  # (K, N) int32
+    root_child_q: np.ndarray = None        # (K,) float32
+    root_child_visits: np.ndarray = None   # (K,) float32
 
 
 @dataclass
@@ -46,6 +50,11 @@ class ReplayItem:
     value_target: np.ndarray   # (B, U+1, N)
     reward_target: np.ndarray  # (B, U, N)
     agent_order: np.ndarray    # (B, N)
+    # Root-step Q-data for action-level AWPO. Not in the JAX pytree (not device_put'd).
+    # Stored separately by ReplayBufferActor and injected at sample time.
+    root_child_actions: np.ndarray = None  # (K, N) int32
+    root_child_q: np.ndarray = None        # (K,) float32
+    root_child_visits: np.ndarray = None   # (K,) float32
 
 
 def flatten_replay_item(item: ReplayItem):
@@ -371,6 +380,7 @@ def process_episode(
             rewards[start : start + unroll_steps, None], (unroll_steps, num_agents)
         ).copy().astype(np.float32)  # (U, N)
 
+        root_t = trajectory[start]
         replay_items.append(
             ReplayItem(
                 observation=observations[start],                                    # (N, obs_size)
@@ -379,6 +389,9 @@ def process_episode(
                 value_target=value_target_per_agent,                               # (U+1, N)
                 reward_target=reward_target_per_agent,                             # (U, N)
                 agent_order=agent_orders[start],                                   # (N,)
+                root_child_actions=root_t.root_child_actions,                      # (K, N) or None
+                root_child_q=root_t.root_child_q,                                  # (K,) or None
+                root_child_visits=root_t.root_child_visits,                        # (K,) or None
             )
         )
 

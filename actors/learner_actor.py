@@ -60,7 +60,7 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
     consistency_horizon = min(int(config.train.consistency_horizon), U)
     awpo_alpha = float(config.train.awpo_alpha)  # 0.0 = disabled
 
-    def train_step(params, opt_state, batch, weights, rng_key, ema_params):
+    def train_step(params, opt_state, batch, weights, rng_key, ema_params, q_data=None):
         # Pre-compute categorical support targets outside loss_fn so they
         # are constants w.r.t. the gradient — zero gradient flows through them.
         value_target_dist = scalar_to_support(
@@ -94,7 +94,47 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
             ce_p0 = optax.softmax_cross_entropy(
                 init_out.policy_logits, batch.policy_target[:, 0]
             ).mean(axis=-1)  # (B,)
-            if awpo_alpha > 0.0:
+            if awpo_alpha > 0.0 and q_data is not None:
+                # Action-level AWPO (MAZero formulation): weight each sampled root
+                # action by exp((Q_k - V_root) / alpha). This directly upweights
+                # actions the tree found better than the OS(λ) root value, rather
+                # than upweighting all actions at states where V_mcts > V_net.
+                q_valid = q_data["q_valid"]             # (B,) bool
+                q_k     = q_data["root_child_q"]        # (B, K)
+                visits_k = q_data["root_child_visits"]  # (B, K)
+                # root_child_actions: (B, K, N) int32
+                child_actions = q_data["root_child_actions"]
+
+                v_root = batch.value_target[:, 0].mean(axis=-1)  # (B,)
+                action_adv = jnp.clip(
+                    (q_k - v_root[:, None]) / awpo_alpha, -5.0, 5.0
+                )  # (B, K)
+                awpo_w_k = jnp.exp(action_adv)  # (B, K)
+
+                # Per-agent log-probs for each sampled joint action:
+                # log_probs[b, n, a] → gather with child_actions[b, k, n]
+                log_probs = jax.nn.log_softmax(init_out.policy_logits, axis=-1)  # (B, N, A)
+                B_, K_ = q_k.shape
+                N_, A_ = log_probs.shape[1], log_probs.shape[2]
+                # Expand log_probs to (B, K, N, A) and gather at child_actions
+                log_probs_exp = jnp.broadcast_to(
+                    log_probs[:, None, :, :], (B_, K_, N_, A_)
+                )
+                gathered = jnp.take_along_axis(
+                    log_probs_exp,
+                    child_actions[:, :, :, None],  # (B, K, N, 1)
+                    axis=-1,
+                ).squeeze(-1)  # (B, K, N)
+                joint_log_prob_k = gathered.sum(axis=-1)  # (B, K)
+
+                # Visit-count-weighted AWPO loss
+                visit_weights = visits_k / (visits_k.sum(axis=-1, keepdims=True) + 1e-8)
+                action_awpo_loss = -(visit_weights * awpo_w_k * joint_log_prob_k).sum(axis=-1)  # (B,)
+
+                # Fall back to plain CE for items where Q-data was not stored
+                p0_loss = jnp.where(q_valid, action_awpo_loss, ce_p0)  # (B,)
+            elif awpo_alpha > 0.0:
+                # No Q-data available (e.g. non-OSLA planner): state-level fallback
                 v_mcts = batch.value_target[:, 0].mean(axis=-1)  # (B,)
                 v_net = support_to_scalar(init_out.value_logits, value_support)  # (B,)
                 advantage = v_mcts - v_net
@@ -393,7 +433,7 @@ class LearnerActor:
         import jax
 
         with self.profiler.time("sample_wait"):
-            batch, weights, indices = ray.get(self._prefetch_future)
+            batch, weights, indices, q_data = ray.get(self._prefetch_future)
         if batch is None:
             self._prefetch_batch()
             return None
@@ -425,8 +465,13 @@ class LearnerActor:
             jax.block_until_ready((jax_batch, jax_weights))
 
         with self.profiler.time("train_step"):
+            # Convert q_data to JAX arrays for device; q_valid mask gates AWPO.
+            jax_q_data = {
+                k: jax.device_put(np.asarray(v)) for k, v in q_data.items()
+            } if q_data is not None else None
             self.params, self.opt_state, transfer_buf, new_priorities = self.train_step(
-                self.params, self.opt_state, jax_batch, jax_weights, train_key, self.ema_params
+                self.params, self.opt_state, jax_batch, jax_weights, train_key,
+                self.ema_params, jax_q_data,
             )
             # Block on params and the transfer buffer (which contains metrics +
             # priorities). new_priorities is a slice of transfer_buf so blocking
