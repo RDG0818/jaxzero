@@ -66,6 +66,7 @@ def run_training_loop(
     episodes_processed = 0
     train_steps = 0
     returns: deque = deque(maxlen=config.train.log_interval)
+    win_rates: deque = deque(maxlen=config.train.log_interval)
     train_losses: deque = deque(maxlen=config.train.log_interval)
     interval_start = time.monotonic()
 
@@ -113,9 +114,10 @@ def run_training_loop(
             reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:
-            ep_return = ray.get(done_ref)
+            ep_return, win_rate = ray.get(done_ref)
             _loop_data_completions += 1
             returns.append(ep_return)
+            win_rates.append(win_rate)
             episodes_processed += config.train.num_envs_per_actor
 
             finished_actor = actor_tasks.pop(done_ref)
@@ -124,6 +126,7 @@ def run_training_loop(
             prev = episodes_processed - config.train.num_envs_per_actor
             if episodes_processed // config.train.log_interval > prev // config.train.log_interval and returns:
                 avg_return = float(np.mean(returns))
+                avg_win_rate = float(np.mean(win_rates)) if win_rates else 0.0
                 avg_loss = float(np.mean(train_losses)) if train_losses else 0.0
                 elapsed = time.monotonic() - interval_start
                 eps_per_sec = config.train.log_interval / elapsed
@@ -132,6 +135,7 @@ def run_training_loop(
                 logger.info(
                     f"Episodes: {episodes_processed:6d} | "
                     f"Avg Return: {avg_return:8.2f} | "
+                    f"Win Rate: {avg_win_rate:.1%} | "
                     f"Avg Loss: {avg_loss:.4f} | "
                     f"eps/s: {eps_per_sec:.1f} | "
                     f"train steps/s: {steps_per_sec:.1f}"
@@ -160,6 +164,7 @@ def run_training_loop(
                     wandb.log(
                         {
                             "avg_return": avg_return,
+                            "win_rate": avg_win_rate,
                             "avg_loss": avg_loss,
                             "episodes": episodes_processed,
                             "eps_per_sec": eps_per_sec,
@@ -196,6 +201,7 @@ def run_training_loop_sync(
     episodes_processed = 0
     train_steps = 0
     returns: deque = deque(maxlen=config.train.log_interval)
+    win_rates: deque = deque(maxlen=config.train.log_interval)
     train_losses: deque = deque(maxlen=config.train.log_interval)
     interval_start = time.monotonic()
 
@@ -203,9 +209,10 @@ def run_training_loop_sync(
 
     while episodes_processed < config.train.num_episodes:
         # Step 1: all actors run one episode batch (blocking).
-        ep_returns = ray.get([actor.run_episode.remote() for actor in data_actors])
-        for r in ep_returns:
-            returns.append(r)
+        ep_results = ray.get([actor.run_episode.remote() for actor in data_actors])
+        for ep_return, win_rate in ep_results:
+            returns.append(ep_return)
+            win_rates.append(win_rate)
         episodes_processed += config.train.num_envs_per_actor * len(data_actors)
 
         # Step 2: learner trains one step (blocking).
@@ -220,6 +227,7 @@ def run_training_loop_sync(
         prev = episodes_processed - config.train.num_envs_per_actor * len(data_actors)
         if episodes_processed // config.train.log_interval > prev // config.train.log_interval and returns:
             avg_return = float(np.mean(returns))
+            avg_win_rate = float(np.mean(win_rates)) if win_rates else 0.0
             avg_loss = float(np.mean(train_losses)) if train_losses else 0.0
             elapsed = time.monotonic() - interval_start
             eps_per_sec = config.train.log_interval / elapsed
@@ -228,6 +236,7 @@ def run_training_loop_sync(
             logger.info(
                 f"Episodes: {episodes_processed:6d} | "
                 f"Avg Return: {avg_return:8.2f} | "
+                f"Win Rate: {avg_win_rate:.1%} | "
                 f"Avg Loss: {avg_loss:.4f} | "
                 f"eps/s: {eps_per_sec:.1f} | "
                 f"train steps/s: {steps_per_sec:.1f}"
@@ -241,6 +250,7 @@ def run_training_loop_sync(
                 wandb.log(
                     {
                         "avg_return": avg_return,
+                        "win_rate": avg_win_rate,
                         "avg_loss": avg_loss,
                         "episodes": episodes_processed,
                         "eps_per_sec": eps_per_sec,

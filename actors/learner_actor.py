@@ -194,12 +194,18 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 - batch.value_target[:, 0].mean(axis=1)
             )
 
+            policy_probs = jax.nn.softmax(init_out.policy_logits, axis=-1)  # (B, N, A)
+            policy_entropy = -jnp.sum(
+                policy_probs * jnp.log(policy_probs + 1e-8), axis=-1
+            ).mean()  # scalar; uniform over 9 actions = log(9) ≈ 2.197
+
             metric_scalars = jnp.stack([
                 total_loss,
                 reward_loss.mean(),
                 policy_loss.mean(),
                 value_loss.mean(),
                 consistency_loss.mean(),
+                policy_entropy,
             ])
             return total_loss, (metric_scalars, td_error)
 
@@ -441,7 +447,7 @@ class LearnerActor:
         # EMA runs async on GPU; by now (after d2h_transfer ~1.7ms) it is likely
         # done, but JAX will sync it implicitly when next train_step uses ema_params.
 
-        N_METRICS = 6  # total, reward, policy, value, consistency, grad_norm
+        N_METRICS = 7  # total, reward, policy, value, consistency, policy_entropy, grad_norm
         priorities_np = buf_np[N_METRICS:]
         self.replay_buffer.update_priorities.remote(indices, priorities_np)
 
@@ -449,7 +455,7 @@ class LearnerActor:
             self._save_checkpoint()
 
         METRIC_KEYS = ["total_loss", "reward_loss", "policy_loss", "value_loss",
-                       "consistency_loss", "grad_norm"]
+                       "consistency_loss", "policy_entropy", "grad_norm"]
         metrics = dict(zip(METRIC_KEYS, buf_np[:N_METRICS].tolist()))
 
         # Refresh cached lr every lr_log_interval steps; avoids per-step JAX dispatch.
@@ -480,7 +486,8 @@ class LearnerActor:
                 f"reward={metrics['reward_loss']:.4f} "
                 f"policy={metrics['policy_loss']:.4f} "
                 f"value={metrics['value_loss']:.4f} "
-                f"consistency={metrics['consistency_loss']:.4f} | "
+                f"consistency={metrics['consistency_loss']:.4f} "
+                f"entropy={metrics['policy_entropy']:.3f} | "
                 f"grad_norm={grad_norm:.3f}"
             )
 

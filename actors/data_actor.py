@@ -9,7 +9,7 @@ from utils.logging_utils import logger
 from utils.profiler import Profiler
 
 
-@ray.remote(num_cpus=2)
+@ray.remote(num_cpus=1)
 class DataActor:
     """
     Generates experience on CPU via MCTS planning.
@@ -137,6 +137,7 @@ class DataActor:
 
         episodes = [Episode() for _ in range(B)]
         active = [True] * B
+        episode_wins = [False] * B
 
         for _ in range(self.config.train.max_episode_steps):
             self.rng_key, plan_key, step_key = jax.random.split(self.rng_key, 3)
@@ -171,11 +172,12 @@ class DataActor:
 
             with self.profiler.time("env_step"):
                 step_keys = jax.random.split(step_key, B)
-                next_obs, next_states, rewards, dones, *_ = self.env.step(
+                next_obs, next_states, rewards, dones, *extra = self.env.step(
                     step_keys, states, actions_np
                 )
                 rewards_np = np.array(rewards)
                 dones_np = np.array(dones)
+                won_np = np.array(extra[0]) if extra else np.zeros(B, dtype=bool)
 
             for i in range(B):
                 if not active[i]:
@@ -191,6 +193,8 @@ class DataActor:
                         agent_order=np.array(plan_output.agent_order),
                     )
                 )
+                if won_np[i]:
+                    episode_wins[i] = True
                 if dones_np[i]:
                     active[i] = False
 
@@ -236,4 +240,6 @@ class DataActor:
 
         self.profiler.step()
 
-        return float(np.mean([ep.episode_return for ep in episodes]))
+        win_rate = float(np.mean(episode_wins))
+        mean_return = float(np.mean([ep.episode_return for ep in episodes]))
+        return mean_return, win_rate
