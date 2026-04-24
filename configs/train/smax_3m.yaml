@@ -30,7 +30,7 @@ awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)
 # leaving ~4 for OS/learner dispatch/replay buffer.
 num_actors: 3
 num_envs_per_actor: 4
-batch_size: 2048
+batch_size: 256
 num_reanalyze_actors: 1  # 1 reanalyze actor; more starves data actors on 12-core machine
 reanalyze_batch_size: 64   # was 256 — smaller batches reduce early-training interference
 consistency_scale: 1.0   # was 0.25; prior 1.0 issues were before LR+AWPO fixes — try again
