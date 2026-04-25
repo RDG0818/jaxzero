@@ -17,7 +17,7 @@ num_agents: 3
 max_episode_steps: 100  # JaxMARL HeuristicEnemySMAX 3m terminates at 100 steps
 
 # --- MaZero paper SMAC hyperparameters ---
-learning_rate: 1e-4      # paper uses 5e-4 constant; was 1e-4
+learning_rate: 5e-4      # paper uses 5e-4 constant
 lr_warmup_steps: 0       # no warmup; paper uses constant LR
 end_lr_factor: 1.0       # no decay (1.0 = constant LR)
 n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
