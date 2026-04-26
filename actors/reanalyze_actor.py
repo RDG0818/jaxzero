@@ -110,15 +110,6 @@ class ReanalyzeActor:
         import jax
         import jax.numpy as jnp
 
-        # Gate: don't reanalyze until the learner has run past warmup.
-        # Early reanalysis overwrites reward-grounded n-step values with
-        # MCTS estimates from a near-random model, degrading target quality.
-        warmup_gate = self.config.train.warmup_episodes * 2
-        if warmup_gate > 0:
-            learner_steps = ray.get(self.learner.get_train_step_count.remote())
-            if learner_steps < warmup_gate:
-                return
-
         with self.profiler.time("sample_wait"):
             indices, observations, _ = ray.get(
                 self.replay_buffer.sample_for_reanalysis.remote(

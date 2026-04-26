@@ -85,31 +85,35 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 init_out.value_logits, value_target_dist[:, 0]
             )
 
-            # AWPO: weight root policy loss by exp((V_mcts - V_net) / alpha).
-            # V_mcts is the MCTS root value stored at collection time;
-            # V_net is the network's current prediction. Normalizing by the
-            # batch mean keeps the loss scale stable across training.
+            # AWPO: weight root policy loss by action-level AWAC weights.
+            # Uses current V_net as baseline + batch normalization of advantages
+            # so the signal is non-trivial even when Q ≈ V ≈ 0 (MAZero formulation).
             # When awpo_alpha=0 (disabled), this branch is eliminated at JIT
             # trace time and reduces to plain mean cross-entropy.
             ce_p0 = optax.softmax_cross_entropy(
                 init_out.policy_logits, batch.policy_target[:, 0]
             ).mean(axis=-1)  # (B,)
             if awpo_alpha > 0.0 and q_data is not None:
-                # Action-level AWPO (MAZero formulation): weight each sampled root
-                # action by exp((Q_k - V_root) / alpha). This directly upweights
-                # actions the tree found better than the OS(λ) root value, rather
-                # than upweighting all actions at states where V_mcts > V_net.
+                # Action-level AWPO (MAZero/AWAC formulation): weight each sampled
+                # root action by exp((Q_k - V_net - mean) / (std + eps) / alpha).
+                # V_net is the CURRENT network prediction (not stale stored value).
+                # Batch normalization ensures non-trivial gradient signal even when
+                # Q ≈ V ≈ 0 — critical for cold-start on sparse rewards like SMAX.
                 q_valid = q_data["q_valid"]             # (B,) bool
                 q_k     = q_data["root_child_q"]        # (B, K)
                 visits_k = q_data["root_child_visits"]  # (B, K)
                 # root_child_actions: (B, K, N) int32
                 child_actions = q_data["root_child_actions"]
 
-                v_root = batch.value_target[:, 0].mean(axis=-1)  # (B,)
-                action_adv = jnp.clip(
-                    (q_k - v_root[:, None]) / awpo_alpha, -5.0, 5.0
-                )  # (B, K)
-                awpo_w_k = jnp.exp(action_adv)  # (B, K)
+                # Current network value prediction as AWAC baseline (not stale MCTS value)
+                v_net = support_to_scalar(init_out.value_logits, value_support)  # (B,)
+                action_adv_raw = q_k - v_net[:, None]  # (B, K)
+                # Batch-normalize so exp weights have non-trivial variance regardless
+                # of absolute Q/V scale (matches MAZero advantage normalization)
+                adv_mean = action_adv_raw.mean()
+                adv_std = action_adv_raw.std()
+                action_adv_norm = (action_adv_raw - adv_mean) / (adv_std + 1e-8)
+                awpo_w_k = jnp.exp(jnp.clip(action_adv_norm / awpo_alpha, -5.0, 5.0))  # (B, K)
 
                 # Per-agent log-probs for each sampled joint action:
                 # log_probs[b, n, a] → gather with child_actions[b, k, n]
@@ -138,8 +142,10 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 v_mcts = batch.value_target[:, 0].mean(axis=-1)  # (B,)
                 v_net = support_to_scalar(init_out.value_logits, value_support)  # (B,)
                 advantage = v_mcts - v_net
-                awpo_w = jnp.exp(jnp.clip(advantage / awpo_alpha, -5.0, 5.0))
-                awpo_w = awpo_w / (awpo_w.mean() + 1e-8)
+                adv_mean = advantage.mean()
+                adv_std = advantage.std()
+                advantage_norm = (advantage - adv_mean) / (adv_std + 1e-8)
+                awpo_w = jnp.exp(jnp.clip(advantage_norm / awpo_alpha, -5.0, 5.0))
                 p0_loss = awpo_w * ce_p0  # (B,)
             else:
                 p0_loss = ce_p0  # (B,)

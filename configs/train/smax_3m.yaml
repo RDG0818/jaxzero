@@ -22,7 +22,7 @@ lr_warmup_steps: 0       # no warmup; paper uses constant LR
 end_lr_factor: 1.0       # no decay (1.0 = constant LR)
 n_step: 5                # paper uses 5; default 10 causes NaN on sparse SMAX rewards
 warmup_episodes: 50
-awpo_alpha: 1.0          # AWPO advantage temperature (MAZero paper value)
+awpo_alpha: 2.0          # AWPO advantage temperature (MAZero awac_lambda=2)
 
 # Data actors: 3 actors × 4 envs = 12 parallel envs.
 # Each actor claims 2 CPUs (@ray.remote(num_cpus=2)) and limits XLA to 2 threads,
