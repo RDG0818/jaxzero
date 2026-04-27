@@ -384,7 +384,12 @@ def process_episode(
         ).copy().astype(np.float32)  # (U, N)
 
         # Collect Q-data for all U+1 positions in this window.
-        if trajectory[start].root_child_q is not None:
+        # Require ALL positions to have Q-data; partial windows are treated as no Q-data.
+        has_q_data = all(
+            trajectory[start + i].root_child_q is not None
+            for i in range(unroll_steps + 1)
+        )
+        if has_q_data:
             all_child_actions = np.stack(
                 [trajectory[start + i].root_child_actions for i in range(unroll_steps + 1)]
             )  # (U+1, K, N)
@@ -394,9 +399,7 @@ def process_episode(
             all_child_visits = np.stack(
                 [trajectory[start + i].root_child_visits for i in range(unroll_steps + 1)]
             )  # (U+1, K)
-            all_child_valid = np.array(
-                [trajectory[start + i].root_child_q is not None for i in range(unroll_steps + 1)]
-            )  # (U+1,) bool
+            all_child_valid = np.ones(unroll_steps + 1, dtype=bool)  # all positions valid
         else:
             all_child_actions = all_child_q = all_child_visits = all_child_valid = None
 
