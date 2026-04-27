@@ -59,6 +59,8 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
     # Clamp horizon to U so range(U+1-k) is always ≥ 1.
     consistency_horizon = min(int(config.train.consistency_horizon), U)
     awpo_alpha = float(config.train.awpo_alpha)  # 0.0 = disabled
+    K = config.mcts.num_gumbel_samples   # static: K sampled joint actions per MCTS node
+    N = config.train.num_agents          # static: number of agents
 
     def train_step(params, opt_state, batch, weights, rng_key, ema_params, q_data=None):
         # Pre-compute categorical support targets outside loss_fn so they
@@ -99,11 +101,10 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
                 # V_net is the CURRENT network prediction (not stale stored value).
                 # Batch normalization ensures non-trivial gradient signal even when
                 # Q ≈ V ≈ 0 — critical for cold-start on sparse rewards like SMAX.
-                q_valid = q_data["q_valid"]             # (B,) bool
-                q_k     = q_data["root_child_q"]        # (B, K)
-                visits_k = q_data["root_child_visits"]  # (B, K)
-                # root_child_actions: (B, K, N) int32
-                child_actions = q_data["root_child_actions"]
+                q_valid       = q_data["all_child_valid"][:, 0]      # (B,) bool — root position
+                q_k           = q_data["all_child_q"][:, 0]          # (B, K)
+                visits_k      = q_data["all_child_visits"][:, 0]     # (B, K)
+                child_actions = q_data["all_child_actions"][:, 0]    # (B, K, N)
 
                 # Current network value prediction as AWAC baseline (not stale MCTS value)
                 v_net = support_to_scalar(init_out.value_logits, value_support)  # (B,)
@@ -153,36 +154,100 @@ def make_train_step(model, optimizer, value_support, reward_support, config: Exp
             # ---- Steps 1..U: unroll via scan ----
             # Consistency is computed outside the scan so multi-step pairs
             # (h_t, h_{t+k}) for k>1 can reuse the same hidden states.
-            def scan_step(hidden, inputs):
-                ai, ri_dist, pi_target, vi_dist, step_key = inputs
+            if awpo_alpha > 0.0:
+                # Build per-step Q-data for the scan (positions 1..U).
+                # When q_data is None (non-OSLA planner), pass zeros with all-invalid mask
+                # so scan_step always has the same input structure.
+                if q_data is not None:
+                    step_q_acts  = jnp.moveaxis(q_data["all_child_actions"][:, 1:], 1, 0)  # (U, B, K, N)
+                    step_q_q     = jnp.moveaxis(q_data["all_child_q"][:, 1:],       1, 0)  # (U, B, K)
+                    step_q_vis   = jnp.moveaxis(q_data["all_child_visits"][:, 1:],  1, 0)  # (U, B, K)
+                    step_q_valid = jnp.moveaxis(q_data["all_child_valid"][:, 1:],   1, 0)  # (U, B)
+                else:
+                    B_ = batch.observation.shape[0]
+                    step_q_acts  = jnp.zeros((U, B_, K, N), jnp.int32)
+                    step_q_q     = jnp.zeros((U, B_, K),    jnp.float32)
+                    step_q_vis   = jnp.zeros((U, B_, K),    jnp.float32)
+                    step_q_valid = jnp.zeros((U, B_),       jnp.bool_)
 
-                hidden = scale_grad_half(hidden)  # half-gradient on hidden states (MuZero paper §E)
-
-                out = model.apply(
-                    {"params": p}, hidden, ai,
-                    method=model.recurrent_inference,
-                    rngs={"dropout": step_key},
+                xs = (
+                    jnp.moveaxis(batch.actions, 1, 0),
+                    jnp.moveaxis(reward_target_dist, 1, 0),
+                    jnp.moveaxis(batch.policy_target[:, 1:], 1, 0),
+                    jnp.moveaxis(value_target_dist[:, 1:], 1, 0),
+                    unroll_keys,
+                    step_q_acts,
+                    step_q_q,
+                    step_q_vis,
+                    step_q_valid,
                 )
-                next_hidden = out.hidden_state
 
-                ri_loss = optax.softmax_cross_entropy(out.reward_logits, ri_dist)
-                pi_loss = optax.softmax_cross_entropy(
-                    out.policy_logits, pi_target
-                ).mean(axis=-1)
-                vi_loss = optax.softmax_cross_entropy(out.value_logits, vi_dist)
+                def scan_step(hidden, inputs):
+                    ai, ri_dist, pi_target, vi_dist, step_key, qd_acts, qd_q, qd_vis, qd_valid = inputs
+                    hidden = scale_grad_half(hidden)
+                    out = model.apply(
+                        {"params": p}, hidden, ai,
+                        method=model.recurrent_inference,
+                        rngs={"dropout": step_key},
+                    )
+                    next_hidden = out.hidden_state
+                    ri_loss = optax.softmax_cross_entropy(out.reward_logits, ri_dist)
+                    vi_loss = optax.softmax_cross_entropy(out.value_logits, vi_dist)
 
-                # next_hidden returned as output so the caller can collect all
-                # hidden states for multi-step consistency.
-                return next_hidden, (ri_loss, pi_loss, vi_loss, next_hidden)
+                    # AWPO at this unroll step (mirrors root step computation)
+                    ce_loss = optax.softmax_cross_entropy(
+                        out.policy_logits, pi_target
+                    ).mean(axis=-1)  # (B,) fallback
+                    v_net_step = support_to_scalar(out.value_logits, value_support)  # (B,)
+                    adv_raw  = qd_q - v_net_step[:, None]                            # (B, K)
+                    adv_mean = adv_raw.mean()
+                    adv_std  = adv_raw.std()
+                    adv_norm = (adv_raw - adv_mean) / (adv_std + 1e-8)              # (B, K)
+                    awpo_w   = jnp.exp(jnp.clip(adv_norm / awpo_alpha, -5.0, 5.0)) # (B, K)
+                    B_ = qd_q.shape[0]
+                    K_ = qd_q.shape[1]
+                    N_ = out.policy_logits.shape[1]
+                    A_ = out.policy_logits.shape[2]
+                    log_probs = jax.nn.log_softmax(out.policy_logits, axis=-1)      # (B, N, A)
+                    lp_exp = jnp.broadcast_to(log_probs[:, None, :, :], (B_, K_, N_, A_))
+                    gathered = jnp.take_along_axis(
+                        lp_exp, qd_acts[:, :, :, None], axis=-1
+                    ).squeeze(-1)                                                    # (B, K, N)
+                    jlp_k = gathered.sum(axis=-1)                                   # (B, K)
+                    vis_w = qd_vis / (qd_vis.sum(axis=-1, keepdims=True) + 1e-8)   # (B, K)
+                    awpo_loss = -(vis_w * awpo_w * jlp_k).sum(axis=-1)             # (B,)
+                    pi_loss = jnp.where(qd_valid, awpo_loss, ce_loss)              # (B,)
+
+                    return next_hidden, (ri_loss, pi_loss, vi_loss, next_hidden)
+
+            else:
+                xs = (
+                    jnp.moveaxis(batch.actions, 1, 0),
+                    jnp.moveaxis(reward_target_dist, 1, 0),
+                    jnp.moveaxis(batch.policy_target[:, 1:], 1, 0),
+                    jnp.moveaxis(value_target_dist[:, 1:], 1, 0),
+                    unroll_keys,
+                )
+
+                def scan_step(hidden, inputs):
+                    ai, ri_dist, pi_target, vi_dist, step_key = inputs
+                    hidden = scale_grad_half(hidden)  # half-gradient on hidden states (MuZero paper §E)
+                    out = model.apply(
+                        {"params": p}, hidden, ai,
+                        method=model.recurrent_inference,
+                        rngs={"dropout": step_key},
+                    )
+                    next_hidden = out.hidden_state
+                    ri_loss = optax.softmax_cross_entropy(out.reward_logits, ri_dist)
+                    pi_loss = optax.softmax_cross_entropy(
+                        out.policy_logits, pi_target
+                    ).mean(axis=-1)
+                    vi_loss = optax.softmax_cross_entropy(out.value_logits, vi_dist)
+                    # next_hidden returned as output so the caller can collect all
+                    # hidden states for multi-step consistency.
+                    return next_hidden, (ri_loss, pi_loss, vi_loss, next_hidden)
 
             # Transpose to step-major for scan: (B, U, ...) → (U, B, ...)
-            xs = (
-                jnp.moveaxis(batch.actions, 1, 0),
-                jnp.moveaxis(reward_target_dist, 1, 0),
-                jnp.moveaxis(batch.policy_target[:, 1:], 1, 0),
-                jnp.moveaxis(value_target_dist[:, 1:], 1, 0),
-                unroll_keys,
-            )
             _, (ri_losses, pi_losses, vi_losses, scan_hiddens) = jax.lax.scan(
                 scan_step, hidden, xs
             )

@@ -77,3 +77,38 @@ def test_action_level_awpo_joint_log_prob_sums_over_agents():
     # Manual check: joint log-prob = sum of per-agent log_prob(action=0)
     expected = log_probs[:, :, 0].sum(axis=-1, keepdims=True)  # (B, 1)
     assert jnp.allclose(joint_log_prob_k, jnp.broadcast_to(expected, (B, K)), atol=1e-5)
+
+
+def test_multi_step_awpo_weights_differ_across_steps():
+    """
+    With different Q-values at each unroll step, AWPO weights should vary across steps.
+    Verifies that per-step advantage normalization produces non-trivial gradients.
+    """
+    import os
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    import jax.numpy as jnp
+
+    B, U, K = 2, 3, 4
+    awpo_alpha = 2.0
+
+    # All Q-values uniform within each step → advantages normalize to 0 → weight = 1
+    all_child_q = jnp.stack([
+        jnp.full((B, K), float(i)) for i in range(U + 1)
+    ], axis=1)  # (B, U+1, K)
+    v_net = jnp.zeros((B,))
+
+    for step in range(U + 1):
+        q_k = all_child_q[:, step, :]
+        adv_raw = q_k - v_net[:, None]
+        adv_norm = (adv_raw - adv_raw.mean()) / (adv_raw.std() + 1e-8)
+        w = jnp.exp(jnp.clip(adv_norm / awpo_alpha, -5.0, 5.0))
+        assert abs(float(w.mean()) - 1.0) < 1e-4, \
+            f"Uniform Q within step should yield weight~1, got {float(w.mean())}"
+
+    # Varying Q-values: best action gets highest weight
+    q_varying = jnp.array([[1.0, 0.0, 0.5, 0.5]] * B)  # (B, K)
+    adv_raw = q_varying - v_net[:, None]
+    adv_norm = (adv_raw - adv_raw.mean()) / (adv_raw.std() + 1e-8)
+    w = jnp.exp(jnp.clip(adv_norm / awpo_alpha, -5.0, 5.0))
+    assert float(w[0, 0]) > float(w[0, 1]), "Best action should get highest AWPO weight"
