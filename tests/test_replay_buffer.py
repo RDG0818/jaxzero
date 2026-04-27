@@ -301,3 +301,78 @@ def test_process_episode_too_short():
     items = process_episode(ep, unroll_steps=5, n_step=3,
                             discount_gamma=0.99, num_agents=N)
     assert items == []
+
+
+def test_replay_item_all_child_fields_exist():
+    """ReplayItem should have all_child_* fields for per-step Q-data."""
+    from utils.replay_buffer import ReplayItem
+    import numpy as np
+    item = ReplayItem(
+        observation=np.zeros((3, 10)),
+        actions=np.zeros((5, 3), dtype=np.int32),
+        policy_target=np.zeros((6, 3, 9)),
+        value_target=np.zeros((6, 3)),
+        reward_target=np.zeros((5, 3)),
+        agent_order=np.arange(3),
+        all_child_actions=np.zeros((6, 10, 3), dtype=np.int32),
+        all_child_q=np.zeros((6, 10)),
+        all_child_visits=np.zeros((6, 10)),
+        all_child_valid=np.ones(6, dtype=bool),
+    )
+    assert item.all_child_actions.shape == (6, 10, 3)
+    assert item.all_child_q.shape == (6, 10)
+    assert item.all_child_visits.shape == (6, 10)
+    assert item.all_child_valid.shape == (6,)
+
+
+def test_process_episode_all_child_q_shape():
+    """process_episode should store Q-data for all U+1 positions."""
+    from utils.replay_buffer import Episode, Transition, process_episode
+    import numpy as np
+
+    N, A, K, U, T = 3, 9, 5, 5, 12
+    obs_size = 18
+    ep = Episode()
+    for _ in range(T):
+        ep.add_step(Transition(
+            observation=np.zeros((N, obs_size)),
+            action=np.zeros(N, dtype=np.int32),
+            reward=0.0,
+            done=False,
+            policy_target=np.ones((N, A)) / A,
+            value_target=0.0,
+            agent_order=np.arange(N),
+            root_child_actions=np.zeros((K, N), dtype=np.int32),
+            root_child_q=np.zeros(K),
+            root_child_visits=np.ones(K),
+        ))
+    items = process_episode(ep, unroll_steps=U, n_step=5, discount_gamma=0.99, num_agents=N)
+    assert len(items) > 0
+    it = items[0]
+    assert it.all_child_actions is not None
+    assert it.all_child_q.shape == (U + 1, K)
+    assert it.all_child_actions.shape == (U + 1, K, N)
+    assert it.all_child_visits.shape == (U + 1, K)
+    assert it.all_child_valid.shape == (U + 1,)
+    assert it.all_child_valid.all(), "all positions should be valid since ep_len > U"
+
+
+def test_process_episode_all_child_q_none_without_q():
+    """process_episode should leave all_child_* as None when Transitions have no Q-data."""
+    from utils.replay_buffer import Episode, Transition, process_episode
+    import numpy as np
+
+    ep = Episode()
+    for _ in range(10):
+        ep.add_step(Transition(
+            observation=np.zeros((3, 18)),
+            action=np.zeros(3, dtype=np.int32),
+            reward=0.0, done=False,
+            policy_target=np.ones((3, 9)) / 9,
+            value_target=0.0,
+            agent_order=np.arange(3),
+        ))
+    items = process_episode(ep, unroll_steps=5, n_step=5, discount_gamma=0.99, num_agents=3)
+    for it in items:
+        assert it.all_child_q is None
+        assert it.all_child_actions is None

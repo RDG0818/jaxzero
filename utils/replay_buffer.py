@@ -42,7 +42,8 @@ class ReplayItem:
     A single, self-contained training sample for the MuZero model.
 
     Shapes (using shorthand):
-        B = batch_size, U = unroll_steps, N = num_agents, A = action_space_size
+        B = batch_size, U = unroll_steps, N = num_agents, A = action_space_size,
+        K = num_gumbel_samples
     """
     observation: np.ndarray    # (B, N, obs_size)
     actions: np.ndarray        # (B, U, N)
@@ -50,11 +51,13 @@ class ReplayItem:
     value_target: np.ndarray   # (B, U+1, N)
     reward_target: np.ndarray  # (B, U, N)
     agent_order: np.ndarray    # (B, N)
-    # Root-step Q-data for action-level AWPO. Not in the JAX pytree (not device_put'd).
-    # Stored separately by ReplayBufferActor and injected at sample time.
-    root_child_actions: np.ndarray = None  # (K, N) int32
-    root_child_q: np.ndarray = None        # (K,) float32
-    root_child_visits: np.ndarray = None   # (K,) float32
+    # Per-step Q-data for action-level AWPO at all U+1 positions.
+    # Not in the JAX pytree — stored in ReplayBufferActor sidecar, injected at sample time.
+    # None when collected by a non-OSLA planner.
+    all_child_actions: np.ndarray = None  # (U+1, K, N) int32
+    all_child_q: np.ndarray = None        # (U+1, K) float32
+    all_child_visits: np.ndarray = None   # (U+1, K) float32
+    all_child_valid: np.ndarray = None    # (U+1,) bool
 
 
 def flatten_replay_item(item: ReplayItem):
@@ -380,7 +383,23 @@ def process_episode(
             rewards[start : start + unroll_steps, None], (unroll_steps, num_agents)
         ).copy().astype(np.float32)  # (U, N)
 
-        root_t = trajectory[start]
+        # Collect Q-data for all U+1 positions in this window.
+        if trajectory[start].root_child_q is not None:
+            all_child_actions = np.stack(
+                [trajectory[start + i].root_child_actions for i in range(unroll_steps + 1)]
+            )  # (U+1, K, N)
+            all_child_q = np.stack(
+                [trajectory[start + i].root_child_q for i in range(unroll_steps + 1)]
+            )  # (U+1, K)
+            all_child_visits = np.stack(
+                [trajectory[start + i].root_child_visits for i in range(unroll_steps + 1)]
+            )  # (U+1, K)
+            all_child_valid = np.array(
+                [trajectory[start + i].root_child_q is not None for i in range(unroll_steps + 1)]
+            )  # (U+1,) bool
+        else:
+            all_child_actions = all_child_q = all_child_visits = all_child_valid = None
+
         replay_items.append(
             ReplayItem(
                 observation=observations[start],                                    # (N, obs_size)
@@ -389,9 +408,10 @@ def process_episode(
                 value_target=value_target_per_agent,                               # (U+1, N)
                 reward_target=reward_target_per_agent,                             # (U, N)
                 agent_order=agent_orders[start],                                   # (N,)
-                root_child_actions=root_t.root_child_actions,                      # (K, N) or None
-                root_child_q=root_t.root_child_q,                                  # (K,) or None
-                root_child_visits=root_t.root_child_visits,                        # (K,) or None
+                all_child_actions=all_child_actions,
+                all_child_q=all_child_q,
+                all_child_visits=all_child_visits,
+                all_child_valid=all_child_valid,
             )
         )
 
