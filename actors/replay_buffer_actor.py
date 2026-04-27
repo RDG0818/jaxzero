@@ -24,16 +24,17 @@ class ReplayBufferActor:
             beta_frames=config.train.replay_buffer_beta_frames,
         )
 
-        # Sidecar arrays for per-root-child Q-data (not stored in C++ buffer).
+        # Sidecar arrays for per-step Q-data at ALL U+1 unroll positions.
         # Indexed by ring-buffer position (add_counter % capacity).
-        # Used by the learner for action-level AWPO (Q_k - V_root advantage).
+        # Used by the learner for action-level AWPO at every unroll step.
         cap = config.train.replay_buffer_size
         K   = config.mcts.num_gumbel_samples
         N   = config.train.num_agents
-        self._q_actions = np.zeros((cap, K, N), dtype=np.int32)
-        self._q_values  = np.zeros((cap, K),    dtype=np.float32)
-        self._q_visits  = np.zeros((cap, K),    dtype=np.float32)
-        self._q_valid   = np.zeros(cap,          dtype=bool)
+        U   = config.train.unroll_steps
+        self._q_actions = np.zeros((cap, U + 1, K, N), dtype=np.int32)
+        self._q_values  = np.zeros((cap, U + 1, K),    dtype=np.float32)
+        self._q_visits  = np.zeros((cap, U + 1, K),    dtype=np.float32)
+        self._q_valid   = np.zeros((cap, U + 1),       dtype=bool)
         self._capacity  = cap
         self._add_counter = 0
 
@@ -41,13 +42,13 @@ class ReplayBufferActor:
         for item, priority in zip(items, priorities):
             slot = self._add_counter % self._capacity
             self.buffer.add(item, priority)
-            if item.root_child_q is not None:
-                self._q_actions[slot] = item.root_child_actions
-                self._q_values[slot]  = item.root_child_q
-                self._q_visits[slot]  = item.root_child_visits
-                self._q_valid[slot]   = True
+            if item.all_child_q is not None:
+                self._q_actions[slot] = item.all_child_actions  # (U+1, K, N)
+                self._q_values[slot]  = item.all_child_q        # (U+1, K)
+                self._q_visits[slot]  = item.all_child_visits   # (U+1, K)
+                self._q_valid[slot]   = item.all_child_valid    # (U+1,) bool
             else:
-                self._q_valid[slot] = False
+                self._q_valid[slot] = np.zeros(self._q_valid.shape[1], dtype=bool)
             self._add_counter += 1
 
     def sample(self, batch_size: int):
@@ -58,10 +59,10 @@ class ReplayBufferActor:
         # Attach sidecar Q-data for the sampled indices.
         # Items that were added before the sidecar was active have q_valid=False.
         q_data = {
-            "root_child_actions": self._q_actions[indices],  # (B, K, N)
-            "root_child_q":       self._q_values[indices],   # (B, K)
-            "root_child_visits":  self._q_visits[indices],   # (B, K)
-            "q_valid":            self._q_valid[indices],    # (B,) bool
+            "all_child_actions": self._q_actions[indices],  # (B, U+1, K, N)
+            "all_child_q":       self._q_values[indices],   # (B, U+1, K)
+            "all_child_visits":  self._q_visits[indices],   # (B, U+1, K)
+            "all_child_valid":   self._q_valid[indices],    # (B, U+1) bool
         }
         return batch, weights, indices, q_data
 
