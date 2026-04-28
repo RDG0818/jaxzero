@@ -72,6 +72,13 @@ class ReplayBufferActor:
     def update_targets(self, indices, policy_targets, root_values):
         self.buffer.update_targets(indices, policy_targets, root_values)
 
+    def update_root_q(self, indices, child_actions, child_q, child_visits):
+        """Update position-0 Q-data sidecar for reanalyzed items."""
+        self._q_actions[indices, 0] = child_actions  # (B, K, N)
+        self._q_values[indices, 0]  = child_q        # (B, K)
+        self._q_visits[indices, 0]  = child_visits   # (B, K)
+        self._q_valid[indices, 0]   = True
+
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         self.buffer.update_priorities(indices, priorities)
 
