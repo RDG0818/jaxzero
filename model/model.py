@@ -79,21 +79,24 @@ class DynamicsNetwork(nn.Module):
         actions_onehot = jax.nn.one_hot(actions, num_classes=self.action_space_size)
         chex.assert_shape(actions_onehot, (batch_size, num_agents, None))
 
-        # Concatenate latent state with one-hot action for each agent.
-        dynamic_input = jnp.concatenate([hidden_states, actions_onehot], axis=-1)
+        ha_concat = jnp.concatenate([hidden_states, actions_onehot], axis=-1)  # (B, N, D+A)
 
-        # Optionally run attention across agents before the per-agent MLP.
         if self.attention_module is not None:
-            dynamic_input = self.attention_module(dynamic_input, deterministic=deterministic)
+            attn_out = self.attention_module(ha_concat, deterministic=deterministic)  # (B, N, D)
+            dynamic_input = jnp.concatenate(
+                [hidden_states, actions_onehot, attn_out], axis=-1
+            )  # (B, N, 2D+A)
+        else:
+            dynamic_input = ha_concat  # (B, N, D+A)
 
         flat_dynamic_input = dynamic_input.reshape(batch_size * num_agents, -1)
         dynamic_net = MLP(layer_sizes=self.fc_dynamic_layers, output_size=self.hidden_state_size)
         next_latent_states = dynamic_net(flat_dynamic_input).reshape(batch_size, num_agents, -1)
 
-        # Residual connection + LayerNorm to stabilize latent magnitudes over long unrolls.
-        next_latent_states = nn.LayerNorm()(next_latent_states + hidden_states)
+        # Plain residual without LayerNorm — matches MAZero's state += hidden_state.
+        next_latent_states = next_latent_states + hidden_states
 
-        # Reward is centralized: flatten all agent states and predict a single joint reward.
+        # Centralized reward: all agent (state, action) pairs → single joint reward.
         reward_input = jnp.concatenate([next_latent_states, actions_onehot], axis=-1)
         flat_reward_input = reward_input.reshape(batch_size, -1)
         reward_output_size = self.reward_support_size * 2 + 1

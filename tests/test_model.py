@@ -285,16 +285,13 @@ class TestDynamicsNetwork:
         assert next_h.shape == (B, N, D)
         assert reward.shape == (B, S * 2 + 1)
 
-    def test_layernorm_stabilizes_magnitude(self, dynamics, dyn_params, rng):
-        """After LayerNorm on the residual, per-feature std should be close to 1."""
-        # Use a large-magnitude hidden state to stress-test the normalization.
+    def test_plain_residual_output_shape(self, dynamics, dyn_params, rng):
+        """Plain residual (no LayerNorm) still produces correct output shapes."""
+        # MAZero uses a plain additive residual: next_h = MLP(input) + hidden_states.
         large_hidden = jnp.ones((B, N, D)) * 1000.0
         actions = jnp.zeros((B, N), dtype=jnp.int32)
         next_h, _ = dynamics.apply({"params": dyn_params}, large_hidden, actions)
-        # LayerNorm normalizes across the D axis; std per (b, n) should be ~1.
-        std = jnp.std(next_h, axis=-1)
-        assert jnp.all(std < 10.0), \
-            "LayerNorm after residual not stabilizing large-magnitude inputs"
+        assert next_h.shape == (B, N, D)
 
     def test_invalid_action_index_raises(self, dynamics, dyn_params, dummy_hidden):
         """Actions outside [0, A) should raise from one_hot or chex."""
@@ -304,6 +301,31 @@ class TestDynamicsNetwork:
         # Verify we still get the right shape (no crash); behavioral validity is
         # the caller's responsibility.
         assert next_h.shape == (B, N, D)
+
+
+def test_dynamics_triple_concat_output_shape(rng, model_config):
+    """DynamicsNetwork with attention should still produce correct output shapes."""
+    import jax.numpy as jnp
+    from model.model import DynamicsNetwork
+    from model.attention import TransformerAttentionEncoder
+
+    attn = TransformerAttentionEncoder(
+        num_layers=1, num_heads=2, hidden_size=D, dropout_rate=0.0
+    )
+    dyn = DynamicsNetwork(
+        hidden_state_size=D,
+        action_space_size=A,
+        reward_support_size=S,
+        fc_dynamic_layers=(D,),
+        fc_reward_layers=(16,),
+        attention_module=attn,
+    )
+    hidden = jnp.ones((B, N, D))
+    actions = jnp.zeros((B, N), dtype=jnp.int32)
+    params = dyn.init(rng, hidden, actions)
+    next_h, reward = dyn.apply(params, hidden, actions)
+    assert next_h.shape == (B, N, D)
+    assert reward.shape == (B, 2 * S + 1)
 
 
 # ─── PredictionNetwork ─────────────────────────────────────────────────────────
