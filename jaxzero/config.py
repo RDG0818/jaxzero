@@ -13,11 +13,11 @@ class MAZeroConfig:
 
     # Model
     hidden_state_size: int = 128
-    fc_representation_layers: tuple = (128, 128)
-    fc_dynamic_layers: tuple = (128, 128)
-    fc_reward_layers: tuple = (32,)
-    fc_value_layers: tuple = (32,)
-    fc_policy_layers: tuple = (32,)
+    fc_representation_layers: tuple[int, ...] = (128, 128)
+    fc_dynamic_layers: tuple[int, ...] = (128, 128)
+    fc_reward_layers: tuple[int, ...] = (32,)
+    fc_value_layers: tuple[int, ...] = (32,)
+    fc_policy_layers: tuple[int, ...] = (32,)
     attention_layers: int = 3
     attention_heads: int = 8
     dropout_rate: float = 0.1
@@ -56,6 +56,7 @@ class MAZeroConfig:
     min_replay_size: int = 300
     priority_alpha: float = 0.6
     priority_beta_start: float = 0.4
+    priority_beta_end: float = 1.0
     target_model_interval: int = 200
 
     # Reanalyze
@@ -71,3 +72,7 @@ class MAZeroConfig:
     @property
     def support_size(self) -> int:
         return self.value_support_size * 2 + 1
+
+    @property
+    def reward_support_size_total(self) -> int:
+        return self.reward_support_size * 2 + 1
