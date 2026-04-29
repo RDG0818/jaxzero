@@ -7,6 +7,7 @@ class MLP(nn.Module):
     """MLP with ReLU+LayerNorm hidden layers and zero-initialized output layer."""
     layer_sizes: Sequence[int]
     output_size: int
+    zero_init_output: bool = True
 
     @nn.compact
     def __call__(self, x: chex.Array) -> chex.Array:
@@ -14,12 +15,15 @@ class MLP(nn.Module):
             x = nn.Dense(size)(x)
             x = nn.relu(x)
             x = nn.LayerNorm()(x)
-        x = nn.Dense(
-            self.output_size,
-            kernel_init=nn.initializers.zeros,
-            bias_init=nn.initializers.zeros,
-            name="output",
-        )(x)
+        if self.zero_init_output:
+            x = nn.Dense(
+                self.output_size,
+                kernel_init=nn.initializers.zeros,
+                bias_init=nn.initializers.zeros,
+                name="output",
+            )(x)
+        else:
+            x = nn.Dense(self.output_size, name="output")(x)
         return x
 
 

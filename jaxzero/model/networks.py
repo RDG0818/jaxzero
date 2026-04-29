@@ -23,7 +23,7 @@ class RepresentationNetwork(nn.Module):
         # obs: (B*N, obs_dim) → (B*N, D)
         # Standard (non-zero) init for representation so hidden states are non-trivial.
         x = nn.LayerNorm()(obs)
-        return MLP(layer_sizes=self.fc_layers, output_size=self.hidden_state_size)(x)
+        return MLP(layer_sizes=self.fc_layers, output_size=self.hidden_state_size, zero_init_output=False)(x)
 
 
 class CommunicationNetwork(nn.Module):
@@ -36,7 +36,7 @@ class CommunicationNetwork(nn.Module):
     def setup(self):
         self.input_proj = nn.Dense(self.hidden_size)
         self.pos_embed = nn.Embed(
-            num_embeddings=32,  # max agents
+            num_embeddings=32,  # supports up to 32 agents; increase for larger maps
             features=self.hidden_size,
         )
         self.transformer = TransformerEncoder(
@@ -73,11 +73,11 @@ class DynamicsNetwork(nn.Module):
             dropout_rate=self.dropout_rate,
         )
         # dynamic_mlp uses standard (non-zero) output init so the residual update is non-trivial.
-        self.dynamic_mlp = nn.Sequential([
-            *[layer for size in self.fc_dynamic_layers
-              for layer in (nn.Dense(size), nn.relu, nn.LayerNorm())],
-            nn.Dense(self.hidden_state_size),
-        ])
+        self.dynamic_mlp = MLP(
+            layer_sizes=self.fc_dynamic_layers,
+            output_size=self.hidden_state_size,
+            zero_init_output=False,
+        )
         self.reward_mlp = MLP(
             layer_sizes=self.fc_reward_layers,
             output_size=self.reward_support_size * 2 + 1,
@@ -168,7 +168,7 @@ class MAMuZeroNet(nn.Module):
             fc_value_layers=cfg.fc_value_layers,
             fc_policy_layers=cfg.fc_policy_layers,
         )
-        self.projection_net = ProjectionNetwork()
+        self.projection_net = ProjectionNetwork(hidden_size=cfg.hidden_state_size)
 
     def __call__(self, obs: chex.Array) -> MuZeroOutput:
         # obs: (B, N, obs_dim)
