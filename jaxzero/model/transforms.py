@@ -23,12 +23,13 @@ def phi(x: chex.Array, support_size: int) -> chex.Array:
     """Encode scalar(s) to categorical distribution over support [-S, S].
 
     Args:
-        x: shape (B,) scalars
+        x: shape (B,) scalars — must be 1-D
         support_size: S, so support has 2*S+1 bins
 
     Returns:
         shape (B, 2*S+1) soft encoding
     """
+    x = jnp.atleast_1d(x)
     x = jnp.clip(x, -support_size, support_size)
     low = jnp.floor(x).astype(jnp.int32)
     high = low + 1
@@ -49,15 +50,15 @@ def phi(x: chex.Array, support_size: int) -> chex.Array:
 
 
 def phi_inv(logits: chex.Array, support_size: int) -> chex.Array:
-    """Decode categorical distribution to scalar via expected value.
+    """Decode categorical logits to scalar via expected value.
 
     Args:
-        logits: shape (B, 2*S+1) distribution from phi
+        logits: shape (B, 2*S+1) unnormalized logits (e.g. network output)
         support_size: S
 
     Returns:
         shape (B,) scalars
     """
     support = jnp.arange(-support_size, support_size + 1, dtype=jnp.float32)
-    # phi returns raw probabilities, not logits, so we compute expected value directly
-    return jnp.dot(logits, support)
+    probs = jax.nn.softmax(logits, axis=-1)
+    return jnp.dot(probs, support)
