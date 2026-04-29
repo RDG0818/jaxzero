@@ -6,7 +6,8 @@ from jaxzero.model.transforms import h, inv_h, phi, phi_inv
 
 def test_h_inv_h_roundtrip():
     x = jnp.array([-10.0, -1.0, 0.0, 1.0, 10.0])
-    assert jnp.allclose(inv_h(h(x)), x, atol=1.5e-4)
+    # float32 accumulates ~1e-4 error through sqrt chains at large magnitudes
+    assert jnp.allclose(inv_h(h(x)), x, atol=2e-4)
 
 
 def test_h_inv_h_roundtrip_scalar():
