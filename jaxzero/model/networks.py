@@ -22,14 +22,8 @@ class RepresentationNetwork(nn.Module):
     def __call__(self, obs: chex.Array) -> chex.Array:
         # obs: (B*N, obs_dim) → (B*N, D)
         # Standard (non-zero) init for representation so hidden states are non-trivial.
-        # Note: no leading LayerNorm — applying LayerNorm to uniform inputs yields all-zeros.
-        x = obs
-        for size in self.fc_layers:
-            x = nn.Dense(size)(x)
-            x = nn.relu(x)
-            x = nn.LayerNorm()(x)
-        x = nn.Dense(self.hidden_state_size)(x)
-        return x
+        x = nn.LayerNorm()(obs)
+        return MLP(layer_sizes=self.fc_layers, output_size=self.hidden_state_size)(x)
 
 
 class CommunicationNetwork(nn.Module):

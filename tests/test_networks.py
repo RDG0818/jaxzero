@@ -21,7 +21,7 @@ def make_net(config=None):
 
 def test_initial_inference_shapes():
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     out = net.apply(params, obs)
     assert out.hidden_state.shape == (B, N, D)
@@ -32,7 +32,7 @@ def test_initial_inference_shapes():
 
 def test_recurrent_inference_shapes():
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     hidden = net.apply(params, obs).hidden_state
     actions = jnp.zeros((B, N), dtype=jnp.int32)
@@ -46,7 +46,7 @@ def test_recurrent_inference_shapes():
 def test_dynamics_residual():
     """next_hidden != input hidden (residual adds, not replaces)."""
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     hidden = net.apply(params, obs).hidden_state
     actions = jnp.zeros((B, N), dtype=jnp.int32)
@@ -56,7 +56,7 @@ def test_dynamics_residual():
 
 def test_project_online_shape():
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     hidden = net.apply(params, obs).hidden_state
     proj = net.apply(params, hidden, method=net.project_online)
@@ -65,7 +65,7 @@ def test_project_online_shape():
 
 def test_project_target_shape():
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     hidden = net.apply(params, obs).hidden_state
     proj = net.apply(params, hidden, method=net.project_target)
@@ -75,7 +75,7 @@ def test_project_target_shape():
 def test_all_params_initialized():
     """init() via __call__ must include dynamics and projection params."""
     net, config = make_net()
-    obs = jnp.ones((B, N, OBS_DIM))
+    obs = jax.random.normal(jax.random.PRNGKey(42), (B, N, OBS_DIM))
     params = net.init(jax.random.PRNGKey(0), obs)
     param_keys = set(params['params'].keys())
     assert 'representation_net' in param_keys
