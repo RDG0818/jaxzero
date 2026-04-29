@@ -1,5 +1,4 @@
 import flax.linen as nn
-import jax.numpy as jnp
 import chex
 from typing import Sequence
 
@@ -25,6 +24,8 @@ class MLP(nn.Module):
 
 
 class TransformerEncoderLayer(nn.Module):
+    """Single post-LN transformer layer: MHSA + FFN, each wrapped in residual + LayerNorm.
+    FFN expands to 4x hidden_size. Dropout applied after FFN projection only."""
     num_heads: int
     hidden_size: int
     dropout_rate: float
@@ -47,6 +48,7 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
+    """Stack of TransformerEncoderLayers. Input last dim must equal hidden_size."""
     num_layers: int
     num_heads: int
     hidden_size: int

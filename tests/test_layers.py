@@ -36,5 +36,5 @@ def test_transformer_output_size_mismatch_raises():
     """Input last dim must equal hidden_size."""
     enc = TransformerEncoder(num_layers=1, num_heads=4, hidden_size=64, dropout_rate=0.0)
     x = jnp.ones((2, 3, 32))
-    with pytest.raises(Exception):
+    with pytest.raises(AssertionError):
         params = enc.init(jax.random.PRNGKey(0), x, deterministic=True)
