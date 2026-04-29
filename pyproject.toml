@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:BuildBackend"
+
+[project]
+name = "jaxzero"
+version = "0.1.0"
+dependencies = [
+    "jax",
+    "flax",
+    "optax",
+    "chex",
+    "numpy",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
