@@ -112,6 +112,7 @@ class PredictionNetwork(nn.Module):
         self.value_mlp = MLP(
             layer_sizes=self.fc_value_layers,
             output_size=self.value_support_size * 2 + 1,
+            zero_init_output=False,
         )
         self.policy_mlp = MLP(
             layer_sizes=self.fc_policy_layers,
