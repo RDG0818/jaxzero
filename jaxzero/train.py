@@ -129,7 +129,7 @@ def collect_episode(env, params, model, config: MAZeroConfig, rng_key):
     import jax.random as jr
 
     mcts = SampledMCTS(config=config, model=model)
-    rng = np.random.default_rng(int(jax.random.randint(rng_key, (), 0, 2**31)))
+    rng = np.random.default_rng(int(jax.random.randint(rng_key, (), 0, 2**31 - 1)))
 
     raw_obs_dim = config.obs_size // config.stacked_observations
     game = GameHistory(
@@ -211,23 +211,21 @@ def train(config: MAZeroConfig, env):
         game = collect_episode(env, params, net, config, ep_rng)
         replay_buffer.add(game)
 
-        if not replay_buffer.can_sample(config.batch_size):
-            continue
+        if replay_buffer.can_sample(config.batch_size):
+            beta = beta_fn(step)
+            ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
+            batch = reanalyze_worker.make_batch(ctx, params)
 
-        beta = beta_fn(step)
-        ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
-        batch = reanalyze_worker.make_batch(ctx, params)
+            loss, grads = jax.value_and_grad(update_fn)(params, batch)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
 
-        loss, grads = jax.value_and_grad(update_fn)(params, batch)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
+            if step % config.target_model_interval == 0:
+                pass  # target_params = params (used by reanalyze in future)
 
-        if step % config.target_model_interval == 0:
-            pass  # target_params = params (used by reanalyze in future)
+            if step % config.log_interval == 0:
+                print(f"Step {step}: loss={float(loss):.4f}")
 
-        if step % config.log_interval == 0:
-            print(f"Step {step}: loss={float(loss):.4f}")
-
-        step += 1
+            step += 1
 
     return params

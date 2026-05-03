@@ -39,6 +39,7 @@ def main():
         num_agents=env.num_agents,
         obs_size=env.obs_size,
         action_space_size=env.action_space_size,
+        stacked_observations=env.stacked_observations,
         seed=args.seed,
         training_steps=args.training_steps,
         use_reanalyze=not args.no_reanalyze,
