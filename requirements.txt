@@ -1,0 +1,27 @@
+# Core JAX stack
+jax==0.4.38
+jaxlib==0.4.38
+flax==0.10.4
+optax==0.2.5
+chex==0.1.90
+
+# Environments
+jaxmarl==0.1.0
+gymnax==0.0.9
+brax==0.10.3
+mujoco==3.1.3
+mujoco-mjx==3.1.3
+
+# jaxmarl dependency (brax pulls jaxopt)
+jaxopt==0.8.5
+
+# Numeric / utils
+numpy==1.26.4
+scipy==1.12.0
+distrax==0.1.5
+orbax-checkpoint==0.11.5
+matplotlib==3.10.4
+trimesh==4.11.5
+
+# Dev
+pytest==9.0.2
