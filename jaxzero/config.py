@@ -63,6 +63,9 @@ class MAZeroConfig:
     use_reanalyze: bool = True
     revisit_policy_search_rate: float = 0.99
 
+    # Collection
+    num_envs_parallel: int = 8
+
     # Logging / eval
     eval_interval: int = 1000
     eval_episodes: int = 32

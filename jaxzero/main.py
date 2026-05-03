@@ -25,29 +25,28 @@ def main():
     )
     args = parser.parse_args()
 
-    # Instantiate environment
+    # Build env factory and probe one instance for dimensions
     if args.env == "3m":
         from jaxzero.envs.smax_wrapper import SMAXWrapper
-        env = SMAXWrapper(map_name="3m", stacked_observations=4)
+        env_fn = lambda: SMAXWrapper(map_name="3m", stacked_observations=4)
     else:
         from jaxzero.envs.mpe_wrapper import MPEWrapper
-        env = MPEWrapper()
+        env_fn = lambda: MPEWrapper()
 
-    # Create config from environment dimensions
+    probe = env_fn()
     config = MAZeroConfig(
         env_name=args.env,
-        num_agents=env.num_agents,
-        obs_size=env.obs_size,
-        action_space_size=env.action_space_size,
-        stacked_observations=env.stacked_observations,
+        num_agents=probe.num_agents,
+        obs_size=probe.obs_size,
+        action_space_size=probe.action_space_size,
+        stacked_observations=probe.stacked_observations,
         seed=args.seed,
         training_steps=args.training_steps,
         use_reanalyze=not args.no_reanalyze,
     )
 
-    # Run training
     from jaxzero.train import train
-    params = train(config, env)
+    params = train(config, env_fn)
     print("Training complete.")
 
 
