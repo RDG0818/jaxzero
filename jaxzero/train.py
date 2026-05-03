@@ -252,25 +252,36 @@ def train(config: MAZeroConfig, env_fn):
     )
 
     step = 0
+    collection_round = 0
+    recent_returns = []
     while step < config.training_steps:
         rng, ep_rng = jr.split(rng)
         # Collect num_envs_parallel episodes simultaneously with batched MCTS
         games = collect_episodes_parallel(envs, params, net, config, ep_rng)
         for game in games:
             replay_buffer.add(game)
+            recent_returns.append(sum(game.rewards))
+            if len(recent_returns) > 100:
+                recent_returns.pop(0)
 
-        if replay_buffer.can_sample(config.batch_size):
-            beta = beta_fn(step)
-            ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
-            batch = reanalyze_worker.make_batch(ctx, params)
+        if not replay_buffer.can_sample(config.batch_size):
+            collection_round += 1
+            if collection_round % 5 == 0:
+                print(f"[filling buffer] round {collection_round}, size={replay_buffer.size}")
+            continue
 
-            loss, grads = jax.value_and_grad(update_fn)(params, batch)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
+        beta = beta_fn(step)
+        ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
+        batch = reanalyze_worker.make_batch(ctx, params)
 
-            if step % config.log_interval == 0:
-                print(f"Step {step}: loss={float(loss):.4f}")
+        loss, grads = jax.value_and_grad(update_fn)(params, batch)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
 
-            step += 1
+        if step % config.log_interval == 0:
+            mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
+            print(f"Step {step}: loss={float(loss):.4f} | ep_return={mean_ret:.2f}")
+
+        step += 1
 
     return params

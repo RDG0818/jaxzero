@@ -23,6 +23,18 @@ def main():
         action="store_true",
         help="Disable reanalyze (use raw MCTS targets)",
     )
+    parser.add_argument(
+        "--num_simulations",
+        type=int,
+        default=None,
+        help="MCTS simulations per step (default: 100; use 10-20 for quick tests)",
+    )
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=None,
+        help="Parallel envs for collection (default: 8)",
+    )
     args = parser.parse_args()
 
     # Build env factory and probe one instance for dimensions
@@ -34,6 +46,11 @@ def main():
         env_fn = lambda: MPEWrapper()
 
     probe = env_fn()
+    overrides = {}
+    if args.num_simulations is not None:
+        overrides["num_simulations"] = args.num_simulations
+    if args.num_envs is not None:
+        overrides["num_envs_parallel"] = args.num_envs
     config = MAZeroConfig(
         env_name=args.env,
         num_agents=probe.num_agents,
@@ -43,6 +60,7 @@ def main():
         seed=args.seed,
         training_steps=args.training_steps,
         use_reanalyze=not args.no_reanalyze,
+        **overrides,
     )
 
     from jaxzero.train import train
