@@ -122,118 +122,101 @@ def make_update_fn(model, config: MAZeroConfig):
     return update_fn
 
 
-def collect_episode(env, params, model, config: MAZeroConfig, rng_key):
-    """Collect a single episode. Used in tests; training uses collect_episodes_parallel."""
-    games = collect_episodes_parallel([env], params, model, config, rng_key)
-    return games[0]
+def _store_search_stats(game, result, idx, config):
+    """Pad ctree results to fixed K and store in game."""
+    visits = result.sampled_visit_counts[idx]
+    actions_pool = result.sampled_actions[idx]
+    K_full = config.sampled_action_times
+    K_actual = len(visits)
+    pad = K_full - K_actual
+    if pad > 0:
+        N_agents = actions_pool.shape[1]
+        actions_padded = np.concatenate(
+            [actions_pool, np.zeros((pad, N_agents), dtype=actions_pool.dtype)], axis=0
+        )
+        visits_padded = np.concatenate([visits, np.zeros(pad, dtype=visits.dtype)])
+        qvals_padded = np.concatenate(
+            [result.sampled_qvalues[idx], np.zeros(pad, dtype=np.float32)]
+        )
+        mask_padded = np.concatenate(
+            [np.ones(K_actual, dtype=bool), np.zeros(pad, dtype=bool)]
+        )
+    else:
+        actions_padded = actions_pool
+        visits_padded = visits
+        qvals_padded = result.sampled_qvalues[idx]
+        mask_padded = np.ones(K_full, dtype=bool)
+    game.store_search_stats(
+        sampled_actions=actions_padded,
+        visit_counts=visits_padded.astype(np.float32) / visits_padded.sum(),
+        qvalues=qvals_padded.astype(np.float32),
+        mask=mask_padded,
+    )
 
 
-def collect_episodes_parallel(envs, params, model, config: MAZeroConfig, rng_key):
-    """Collect one episode per env in parallel using B-batched MCTS inference.
+def collect_episodes_parallel(envs, mcts, params, config: MAZeroConfig, rng_key):
+    """Collect one episode per env using constant B-batch MCTS.
 
-    Each simulation step issues one model call of shape (B, ...) across all
-    active environments simultaneously, maximising GPU utilisation.
-
-    Args:
-        envs: list of EnvWrapper instances (len = B).
-        params: current model parameters.
-        model: MAMuZeroNet.
-        config: MAZeroConfig.
-        rng_key: JAX PRNGKey.
-
-    Returns:
-        list of GameHistory, one per env.
+    Batch size stays fixed at B=len(envs) every step — JAX never recompiles
+    mid-collection. Done envs are skipped in result storage but kept in the
+    batch so the shape doesn't change.
     """
     from jaxzero.game import GameHistory
-    from jaxzero.mcts.sampled_mcts import SampledMCTS
     import jax.random as jr
 
-    n_envs = len(envs)
-    mcts = SampledMCTS(config=config, model=model)
+    B = len(envs)
     np_rng = np.random.default_rng(int(jax.random.randint(rng_key, (), 0, 2**31 - 1)))
     raw_obs_dim = config.obs_size // config.stacked_observations
 
-    games = [
-        GameHistory(
+    env_rngs = jr.split(rng_key, B + 1)
+    step_rng = env_rngs[0]
+
+    obss, states = [], []
+    games = []
+    for i, env in enumerate(envs):
+        obs, state = env.reset(env_rngs[i + 1])
+        obss.append(obs)
+        states.append(state)
+        game = GameHistory(
             num_agents=config.num_agents,
             obs_dim=raw_obs_dim,
             action_space_size=config.action_space_size,
             stacked_observations=config.stacked_observations,
         )
-        for _ in range(n_envs)
-    ]
+        game.store_observation(obs[:, :raw_obs_dim])
+        games.append(game)
 
-    env_rngs = jr.split(rng_key, n_envs + 1)
-    step_rng = env_rngs[0]
-
-    obss, states = [], []
-    for i, env in enumerate(envs):
-        obs, state = env.reset(env_rngs[i + 1])
-        obss.append(obs)
-        states.append(state)
-        games[i].store_observation(obs[:, :raw_obs_dim])
-
-    dones = [False] * n_envs
+    dones = [False] * B
 
     for _ in range(config.max_episode_steps):
         if all(dones):
             break
 
-        active = [i for i in range(n_envs) if not dones[i]]
-        obs_batch = np.stack([obss[i] for i in active])
-        legal_batch = np.stack([envs[i].get_legal_actions(states[i]) for i in active])
-
-        # One MCTS search with B = len(active): model calls batch all active envs
+        # Always full B batch — constant shape, no JAX recompilation
+        obs_batch = np.stack(obss)
+        legal_batch = np.stack([envs[i].get_legal_actions(states[i]) for i in range(B)])
         result = mcts.search(params, obs_batch, legal_batch, np_rng)
 
         step_rng, sub = jr.split(step_rng)
-        sub_rngs = jr.split(sub, n_envs)
+        sub_rngs = jr.split(sub, B)
 
-        for idx, i in enumerate(active):
-            visits = result.sampled_visit_counts[idx]
-            actions_pool = result.sampled_actions[idx]
+        for i in range(B):
+            if dones[i]:
+                continue
+            visits = result.sampled_visit_counts[i]
+            actions_pool = result.sampled_actions[i]
             probs = visits / visits.sum()
-            chosen = np_rng.choice(len(probs), p=probs)
-            action = actions_pool[chosen]
+            action = actions_pool[np_rng.choice(len(probs), p=probs)]
 
             obs_next, state, reward, done, _ = envs[i].step(sub_rngs[i], states[i], action)
 
             games[i].store_observation(obs_next[:, :raw_obs_dim])
             games[i].store_action(action)
             games[i].store_reward(reward)
-            games[i].store_legal_actions(legal_batch[idx])
-            games[i].store_root_value(float(result.root_value[idx]))
+            games[i].store_legal_actions(legal_batch[i])
+            games[i].store_root_value(float(result.root_value[i]))
             games[i].store_pred_value(0.0)
-
-            # Pad to fixed K — ctree deduplicates joint actions, so actual
-            # children count can be < sampled_action_times.
-            K_full = config.sampled_action_times
-            K_actual = len(visits)
-            N_agents = actions_pool.shape[1]
-            pad = K_full - K_actual
-            if pad > 0:
-                actions_padded = np.concatenate(
-                    [actions_pool, np.zeros((pad, N_agents), dtype=actions_pool.dtype)], axis=0
-                )
-                visits_padded = np.concatenate([visits, np.zeros(pad, dtype=visits.dtype)])
-                qvals_padded = np.concatenate(
-                    [result.sampled_qvalues[idx], np.zeros(pad, dtype=np.float32)]
-                )
-                mask_padded = np.concatenate(
-                    [np.ones(K_actual, dtype=bool), np.zeros(pad, dtype=bool)]
-                )
-            else:
-                actions_padded = actions_pool
-                visits_padded = visits
-                qvals_padded = result.sampled_qvalues[idx]
-                mask_padded = np.ones(K_full, dtype=bool)
-
-            games[i].store_search_stats(
-                sampled_actions=actions_padded,
-                visit_counts=visits_padded.astype(np.float32) / visits_padded.sum(),
-                qvalues=qvals_padded.astype(np.float32),
-                mask=mask_padded,
-            )
+            _store_search_stats(games[i], result, i, config)
 
             obss[i] = obs_next
             states[i] = state
@@ -241,6 +224,11 @@ def collect_episodes_parallel(envs, params, model, config: MAZeroConfig, rng_key
                 dones[i] = True
 
     return games
+
+
+def collect_episode(env, mcts, params, config: MAZeroConfig, rng_key):
+    """Collect a single episode. Used in tests."""
+    return collect_episodes_parallel([env], mcts, params, config, rng_key)[0]
 
 
 def train(config: MAZeroConfig, env_fn):
@@ -267,8 +255,18 @@ def train(config: MAZeroConfig, env_fn):
     reanalyze_worker = ReanalyzeWorker(config=config, model=net)
     update_fn = make_update_fn(net, config)
 
-    # Create persistent pool of parallel envs
+    # Create persistent pool of parallel envs and one MCTS instance (JIT compiled once)
     envs = [env_fn() for _ in range(config.num_envs_parallel)]
+    from jaxzero.mcts.sampled_mcts import SampledMCTS
+    mcts = SampledMCTS(config=config, model=net)
+
+    # Warmup JIT: compile initial + recurrent inference at the collection batch size
+    _B = config.num_envs_parallel
+    _obs_dummy = jnp.ones((_B, config.num_agents, config.obs_size))
+    _legal_dummy = np.ones((_B, config.num_agents, config.action_space_size), dtype=bool)
+    print("Compiling JAX model (one-time)...")
+    mcts.search(params, np.array(_obs_dummy), _legal_dummy, np.random.default_rng(0))
+    print("Compilation done.")
 
     beta_fn = lambda step: min(
         1.0,
@@ -280,8 +278,7 @@ def train(config: MAZeroConfig, env_fn):
     recent_returns = []
     while step < config.training_steps:
         rng, ep_rng = jr.split(rng)
-        # Collect num_envs_parallel episodes simultaneously with batched MCTS
-        games = collect_episodes_parallel(envs, params, net, config, ep_rng)
+        games = collect_episodes_parallel(envs, mcts, params, config, ep_rng)
         for game in games:
             replay_buffer.add(game)
             recent_returns.append(sum(game.rewards))
