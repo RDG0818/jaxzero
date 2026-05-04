@@ -204,11 +204,35 @@ def collect_episodes_parallel(envs, params, model, config: MAZeroConfig, rng_key
             games[i].store_legal_actions(legal_batch[idx])
             games[i].store_root_value(float(result.root_value[idx]))
             games[i].store_pred_value(0.0)
+
+            # Pad to fixed K — ctree deduplicates joint actions, so actual
+            # children count can be < sampled_action_times.
+            K_full = config.sampled_action_times
+            K_actual = len(visits)
+            N_agents = actions_pool.shape[1]
+            pad = K_full - K_actual
+            if pad > 0:
+                actions_padded = np.concatenate(
+                    [actions_pool, np.zeros((pad, N_agents), dtype=actions_pool.dtype)], axis=0
+                )
+                visits_padded = np.concatenate([visits, np.zeros(pad, dtype=visits.dtype)])
+                qvals_padded = np.concatenate(
+                    [result.sampled_qvalues[idx], np.zeros(pad, dtype=np.float32)]
+                )
+                mask_padded = np.concatenate(
+                    [np.ones(K_actual, dtype=bool), np.zeros(pad, dtype=bool)]
+                )
+            else:
+                actions_padded = actions_pool
+                visits_padded = visits
+                qvals_padded = result.sampled_qvalues[idx]
+                mask_padded = np.ones(K_full, dtype=bool)
+
             games[i].store_search_stats(
-                sampled_actions=result.sampled_actions[idx],
-                visit_counts=visits.astype(np.float32) / visits.sum(),
-                qvalues=result.sampled_qvalues[idx].astype(np.float32),
-                mask=np.ones(len(visits), dtype=bool),
+                sampled_actions=actions_padded,
+                visit_counts=visits_padded.astype(np.float32) / visits_padded.sum(),
+                qvalues=qvals_padded.astype(np.float32),
+                mask=mask_padded,
             )
 
             obss[i] = obs_next
