@@ -294,18 +294,21 @@ def train(config: MAZeroConfig, env_fn):
                 print(f"[filling buffer] round {collection_round}, size={replay_buffer.size}")
             continue
 
-        beta = beta_fn(step)
-        ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
-        batch = reanalyze_worker.make_batch(ctx, params)
+        for _ in range(config.updates_per_collection):
+            beta = beta_fn(step)
+            ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
+            batch = reanalyze_worker.make_batch(ctx, params)
 
-        loss, grads = jax.value_and_grad(update_fn)(params, batch)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
+            loss, grads = jax.value_and_grad(update_fn)(params, batch)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
 
-        if step % config.log_interval == 0:
-            mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
-            print(f"Step {step}: loss={float(loss):.4f} | ep_return={mean_ret:.2f}")
+            if step % config.log_interval == 0:
+                mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
+                print(f"Step {step}: loss={float(loss):.4f} | ep_return={mean_ret:.2f}")
 
-        step += 1
+            step += 1
+            if step >= config.training_steps:
+                break
 
     return params

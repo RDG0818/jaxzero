@@ -35,6 +35,12 @@ def main():
         default=None,
         help="Parallel envs for collection (default: 8)",
     )
+    parser.add_argument(
+        "--updates_per_collection",
+        type=int,
+        default=None,
+        help="Gradient updates per collection round (default: 10)",
+    )
     args = parser.parse_args()
 
     # Build env factory and probe one instance for dimensions
@@ -51,6 +57,8 @@ def main():
         overrides["num_simulations"] = args.num_simulations
     if args.num_envs is not None:
         overrides["num_envs_parallel"] = args.num_envs
+    if args.updates_per_collection is not None:
+        overrides["updates_per_collection"] = args.updates_per_collection
     config = MAZeroConfig(
         env_name=args.env,
         num_agents=probe.num_agents,
