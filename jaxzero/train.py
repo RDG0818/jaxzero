@@ -13,29 +13,32 @@ def awpo_sharp_loss(
     policy_logits: jnp.ndarray,   # (B, N, A)
     sampled_actions: jnp.ndarray, # (B, K, N)
     visit_counts: jnp.ndarray,    # (B, K) normalized (sum=1)
-    advantages: jnp.ndarray,      # (B, K)
+    advantages: jnp.ndarray,      # (B, K) — should be Q - V_net
     masks: jnp.ndarray,           # (B, K)
     alpha: float,
-    clip: float = 3.0,
+    clip: float = 3.0,            # clips normalized argument before exp (not the exp value)
 ) -> jnp.ndarray:                 # (B,)
     N = policy_logits.shape[1]
     log_probs = jax.nn.log_softmax(policy_logits, axis=-1)  # (B, N, A)
 
     def gather_joint_logprob(log_p, actions):
         # log_p: (N, A), actions: (K, N) -> (K,)
-        # For each k and n, get log_p[n, actions[k, n]], then sum over n
         return jnp.sum(log_p[jnp.arange(N)[None, :], actions], axis=-1)
 
     joint_log_probs = jax.vmap(gather_joint_logprob)(log_probs, sampled_actions)  # (B, K)
 
-    n_valid = masks.sum(-1, keepdims=True) + 1e-8
-    masked_adv_mean = (advantages * masks).sum(-1, keepdims=True) / n_valid
-    adv_centered = (advantages - masked_adv_mean) * masks  # zero invalid → no exp(huge) NaN
-    masked_adv_var = (adv_centered ** 2 * masks).sum(-1, keepdims=True) / n_valid
-    masked_adv_std = jnp.sqrt(masked_adv_var + 1e-10)
-    adv_norm = adv_centered / (masked_adv_std + 1e-5)
-    adv_weights = jnp.exp(adv_norm / alpha)
-    adv_weights = jnp.clip(adv_weights, -clip, clip)
+    # Batch-level normalization over all valid (B*K) entries — matches MAZero/sequential-muzero.
+    # Per-sample normalization (K=10) is too noisy and amplifies noise into random gradients.
+    n_valid = masks.sum() + 1e-8
+    adv_mean = (advantages * masks).sum() / n_valid
+    adv_centered = (advantages - adv_mean) * masks
+    adv_var = (adv_centered ** 2).sum() / n_valid
+    adv_std = jnp.sqrt(adv_var + 1e-8)
+    adv_norm = adv_centered / (adv_std + 1e-8)
+
+    # Clip the normalized argument before exp (not the exp value).
+    # exp(clip(x, -3, 3)) gives weights in [0.05, 20] — safe range with full gradient signal.
+    adv_weights = jnp.exp(jnp.clip(adv_norm / alpha, -clip, clip))
 
     return -(joint_log_probs * visit_counts * adv_weights * masks).sum(axis=-1)
 
@@ -93,11 +96,18 @@ def make_update_fn(model, config: MAZeroConfig):
 
         value_loss = categorical_cross_entropy(out0.value_logits, target_v0)
         reward_loss = jnp.zeros(obs.shape[0])
+
+        # V_net baseline: current model's predicted value (decoded from h-space).
+        # Subtracting V_net before batch normalization ensures the advantage signal
+        # is zero-mean at each state, preventing high-value states from dominating
+        # the batch statistics and corrupting the AWPO gradient.
+        v_pred_0 = phi_inv(out0.value_logits, S_v)  # (B,)
+        adv_0 = target_qvalues[:, 0] - v_pred_0[:, None]  # (B, K)
         policy_loss = awpo_sharp_loss(
             out0.policy_logits,
             sampled_acts[:, 0],
             target_policies[:, 0],
-            target_qvalues[:, 0],
+            adv_0,
             target_masks[:, 0],
             config.awpo_alpha,
             config.adv_clip,
@@ -118,11 +128,14 @@ def make_update_fn(model, config: MAZeroConfig):
 
             reward_loss = reward_loss + categorical_cross_entropy(out_k.reward_logits, target_r)
             value_loss = value_loss + categorical_cross_entropy(out_k.value_logits, target_v)
+
+            v_pred_k = phi_inv(out_k.value_logits, S_v)  # (B,)
+            adv_k = target_qvalues[:, k] - v_pred_k[:, None]  # (B, K)
             policy_loss = policy_loss + awpo_sharp_loss(
                 out_k.policy_logits,
                 sampled_acts[:, k],
                 target_policies[:, k],
-                target_qvalues[:, k],
+                adv_k,
                 target_masks[:, k],
                 config.awpo_alpha,
                 config.adv_clip,

@@ -101,7 +101,8 @@ class GameHistory:
             self.actions[min(pos + k, T - 1)] for k in range(unroll_steps)
         ])
         rewards_batch = np.array([
-            self.rewards[min(pos + k, T - 1)] for k in range(unroll_steps)
+            self.rewards[pos + k] if pos + k < T else 0.0
+            for k in range(unroll_steps)
         ])
 
         # n-step value targets

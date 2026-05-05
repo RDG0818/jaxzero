@@ -14,7 +14,7 @@ def train_async(config: MAZeroConfig) -> dict:
 
     Returns final params as numpy dict.
     """
-    from jaxzero.actors import ReplayBufferActor, LearnerActor, DataActor
+    from jaxzero.actors import ReplayBufferActor, LearnerActor, DataActor, ReanalyzeActor
 
     ray.init(ignore_reinit_error=True)
     print(f"Ray resources: {ray.available_resources()}")
