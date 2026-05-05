@@ -24,10 +24,9 @@ class DataActor:
     """Runs ctree MCTS collection on CPU. Ships GameHistory objects to ReplayBufferActor."""
 
     def __init__(self, actor_id: int, config: MAZeroConfig, learner_actor, replay_buffer_actor):
-        # Must set BEFORE any JAX import
-        import os
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ["JAX_PLATFORMS"] = "cpu"
+        # Ray sets CUDA_VISIBLE_DEVICES="" for CPU workers, causing the JAX CUDA
+        # plugin to crash on cuInit(0). Pop the restriction so the GPU is visible.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
         os.environ.setdefault("OMP_NUM_THREADS", "2")
         os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")

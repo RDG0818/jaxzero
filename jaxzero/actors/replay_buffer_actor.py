@@ -8,8 +8,10 @@ class ReplayBufferActor:
 
     def __init__(self, config: MAZeroConfig):
         import os
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ["JAX_PLATFORMS"] = "cpu"
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ.setdefault("OMP_NUM_THREADS", "4")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+        os.environ.setdefault("MKL_NUM_THREADS", "4")
         from jaxzero.replay_buffer import PrioritizedReplayBuffer
         self._buf = PrioritizedReplayBuffer(config)
 
