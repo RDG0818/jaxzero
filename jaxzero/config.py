@@ -46,6 +46,7 @@ class MAZeroConfig:
     weight_decay: float = 0.0
     max_grad_norm: float = 5.0
     awpo_alpha: float = 3.0
+    adv_clip: float = 3.0
     reward_loss_coeff: float = 1.0
     value_loss_coeff: float = 0.25
     policy_loss_coeff: float = 1.0

@@ -16,6 +16,7 @@ def awpo_sharp_loss(
     advantages: jnp.ndarray,      # (B, K)
     masks: jnp.ndarray,           # (B, K)
     alpha: float,
+    clip: float = 3.0,
 ) -> jnp.ndarray:                 # (B,)
     N = policy_logits.shape[1]
     log_probs = jax.nn.log_softmax(policy_logits, axis=-1)  # (B, N, A)
@@ -30,10 +31,11 @@ def awpo_sharp_loss(
     n_valid = masks.sum(-1, keepdims=True) + 1e-8
     masked_adv_mean = (advantages * masks).sum(-1, keepdims=True) / n_valid
     adv_centered = (advantages - masked_adv_mean) * masks  # zero invalid → no exp(huge) NaN
-    masked_adv_var = (adv_centered ** 2).sum(-1, keepdims=True) / n_valid
+    masked_adv_var = (adv_centered ** 2 * masks).sum(-1, keepdims=True) / n_valid
     masked_adv_std = jnp.sqrt(masked_adv_var + 1e-10)
     adv_norm = adv_centered / (masked_adv_std + 1e-5)
     adv_weights = jnp.exp(adv_norm / alpha)
+    adv_weights = jnp.clip(adv_weights, -clip, clip)
 
     return -(joint_log_probs * visit_counts * adv_weights * masks).sum(axis=-1)
 
@@ -49,6 +51,18 @@ def categorical_cross_entropy(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.
         (B,) per-sample cross-entropy
     """
     return -(targets * jax.nn.log_softmax(logits, axis=-1)).sum(axis=-1)
+
+
+def cosine_similarity_loss(p: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+    """Negative cosine similarity between p and z.
+    p: (B, D)
+    z: (B, D)
+    """
+    p_norm = jnp.sqrt(jnp.sum(p**2, axis=-1, keepdims=True) + 1e-8)
+    z_norm = jnp.sqrt(jnp.sum(z**2, axis=-1, keepdims=True) + 1e-8)
+    p = p / p_norm
+    z = z / z_norm
+    return -(p * z).sum(axis=-1)
 
 
 def _batch_phi_h(vals: jnp.ndarray, S: int) -> jnp.ndarray:
@@ -86,7 +100,9 @@ def make_update_fn(model, config: MAZeroConfig):
             target_qvalues[:, 0],
             target_masks[:, 0],
             config.awpo_alpha,
+            config.adv_clip,
         )
+        consistency_loss = jnp.zeros(obs.shape[0])
 
         hidden = out0.hidden_state
 
@@ -109,27 +125,40 @@ def make_update_fn(model, config: MAZeroConfig):
                 target_qvalues[:, k],
                 target_masks[:, k],
                 config.awpo_alpha,
+                config.adv_clip,
             )
+
+            if config.consistency_coeff > 0:
+                # Online: project + predict from unrolled state
+                dynamic_proj = model.apply(params, out_k.hidden_state, method=model.project_online)
+                # Target: project only from re-encoded actual observation
+                target_out = model.apply(params, obs[:, k])
+                represet_proj = model.apply(params, target_out.hidden_state, method=model.project_target)
+                consistency_loss = consistency_loss + cosine_similarity_loss(
+                    dynamic_proj, lax.stop_gradient(represet_proj)
+                )
 
             hidden = out_k.hidden_state
 
         r_term = config.reward_loss_coeff * reward_loss
         v_term = config.value_loss_coeff * value_loss
         p_term = config.policy_loss_coeff * policy_loss
-        total = r_term + v_term + p_term
+        c_term = config.consistency_coeff * consistency_loss
+        total = r_term + v_term + p_term + c_term
         scalar = (weights * total).mean() / U
         aux = {
             "reward_loss": (weights * r_term).mean() / U,
             "value_loss": (weights * v_term).mean() / U,
             "policy_loss": (weights * p_term).mean() / U,
+            "consistency_loss": (weights * c_term).mean() / U,
         }
-        return scalar, aux
+        return scalar, (aux, total)
 
     _grad_fn = jax.jit(jax.value_and_grad(_loss_fn, has_aux=True))
 
     def update_fn(params: Any, batch: BatchData):
-        (loss, aux), grads = _grad_fn(params, batch)
-        return loss, grads, aux
+        (loss, (aux, priorities)), grads = _grad_fn(params, batch)
+        return loss, grads, aux, priorities
 
     return update_fn
 
@@ -288,8 +317,11 @@ def train(config: MAZeroConfig, env_fn):
     step = 0
     collection_round = 0
     recent_returns = []
+    target_params = params  # Initialize target network
+
     while step < config.training_steps:
         rng, ep_rng = jr.split(rng)
+        # Collection always uses latest params for best data
         games = collect_episodes_parallel(envs, mcts, params, config, ep_rng)
         for game in games:
             replay_buffer.add(game)
@@ -304,13 +336,21 @@ def train(config: MAZeroConfig, env_fn):
             continue
 
         for _ in range(config.updates_per_collection):
+            # Periodically update target network
+            if step % config.target_model_interval == 0:
+                target_params = params
+
             beta = beta_fn(step)
             ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
-            batch = reanalyze_worker.make_batch(ctx, params)
+            # Targets are computed using target_params to stabilize bootstrap
+            batch = reanalyze_worker.make_batch(ctx, target_params)
 
-            loss, grads, aux = update_fn(params, batch)
+            loss, grads, aux, priorities = update_fn(params, batch)
             updates, opt_state = optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
+
+            # Update priorities in buffer for PER
+            replay_buffer.update_priorities(batch.indices, priorities)
 
             if step % config.log_interval == 0:
                 mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
@@ -319,6 +359,7 @@ def train(config: MAZeroConfig, env_fn):
                     f" | r={float(aux['reward_loss']):.3f}"
                     f" v={float(aux['value_loss']):.3f}"
                     f" p={float(aux['policy_loss']):.3f}"
+                    f" c={float(aux['consistency_loss']):.3f}"
                     f" | ep_return={mean_ret:.2f}"
                 )
 

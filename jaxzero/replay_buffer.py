@@ -16,9 +16,11 @@ class PrioritizedReplayBuffer:
     def size(self) -> int:
         return len(self._games)
 
-    def add(self, game: GameHistory, priority: float = 1.0):
+    def add(self, game: GameHistory):
+        # Use max priority to ensure new samples are seen at least once
+        max_p = max(self._priorities) if self._priorities else 1.0
         self._games.append(game)
-        self._priorities.append(priority)
+        self._priorities.append(max_p)
 
     def can_sample(self, batch_size: int) -> bool:
         return self.size >= max(batch_size, self.config.min_replay_size)

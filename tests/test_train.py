@@ -49,8 +49,9 @@ def test_update_fn_runs():
     params = net.init(jax.random.PRNGKey(0), obs_init)
     update_fn = make_update_fn(net, config)
     batch = make_fake_batch(config)
-    loss, grads, aux = update_fn(params, batch)
+    loss, grads, aux, priorities = update_fn(params, batch)
     assert jnp.isfinite(loss)
+    assert priorities.shape == (config.batch_size,)
 
 
 def test_loss_decreases_on_repeated_batch():
@@ -66,7 +67,7 @@ def test_loss_decreases_on_repeated_batch():
 
     losses = []
     for _ in range(20):
-        loss, grads, aux = update_fn(params, batch)
+        loss, grads, aux, priorities = update_fn(params, batch)
         losses.append(float(loss))
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
@@ -84,12 +85,14 @@ def test_update_fn_returns_aux():
     batch = make_fake_batch(config)
 
     result = update_fn(params, batch)
-    assert len(result) == 3, "update_fn should return (loss, grads, aux)"
-    loss, grads, aux = result
+    assert len(result) == 4, "update_fn should return (loss, grads, aux, priorities)"
+    loss, grads, aux, priorities = result
     assert jnp.isfinite(loss)
+    assert priorities.shape == (config.batch_size,)
     assert "reward_loss" in aux
     assert "value_loss" in aux
     assert "policy_loss" in aux
+    assert "consistency_loss" in aux
     assert all(jnp.isfinite(v) for v in aux.values())
 
 
