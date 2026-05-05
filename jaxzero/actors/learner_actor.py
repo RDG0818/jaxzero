@@ -62,9 +62,10 @@ class LearnerActor:
                 break
 
             batch = self.reanalyze_worker.make_batch(ctx, self.params)
-            loss, grads, aux = self.update_fn(self.params, batch)
+            loss, grads, aux, priorities = self.update_fn(self.params, batch)
             updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
             self.params = self._optax.apply_updates(self.params, updates)
+            self.replay_buffer.update_priorities.remote(batch.indices, priorities)
 
             losses.append(float(loss))
             r_losses.append(float(aux["reward_loss"]))
