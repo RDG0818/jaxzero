@@ -50,3 +50,22 @@ class PrioritizedReplayBuffer:
         for idx, p in zip(indices, new_priorities):
             if 0 <= idx < len(self._priorities):
                 self._priorities[idx] = float(abs(p)) + 1e-6
+
+    def update_reanalyzed_stats(
+        self,
+        game_idx: int,
+        pos: int,
+        policy: np.ndarray,
+        qvalues: np.ndarray,
+        actions: np.ndarray,
+        mask: np.ndarray,
+        root_value: float,
+    ):
+        if 0 <= game_idx < len(self._games):
+            game = self._games[game_idx]
+            if 0 <= pos < len(game):
+                game.sampled_policies[pos] = policy
+                game.sampled_qvalues[pos] = qvalues
+                game.sampled_actions[pos] = actions
+                game.sampled_masks[pos] = mask
+                game.root_values[pos] = root_value

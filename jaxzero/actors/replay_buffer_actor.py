@@ -30,5 +30,36 @@ class ReplayBufferActor:
     def update_priorities(self, indices, new_priorities) -> None:
         self._buf.update_priorities(indices, new_priorities)
 
+    def sample_for_reanalyze(self, batch_size: int):
+        """Sample (game_idx, pos, obs, legal) for reanalysis."""
+        if self._buf.size == 0:
+            return None
+        
+        # Uniform sampling for reanalysis
+        game_indices = np.random.randint(0, self._buf.size, size=batch_size)
+        results = []
+        for g_idx in game_indices:
+            game = self._buf._games[g_idx]
+            pos = np.random.randint(0, len(game))
+            obs = game.obs(pos, self._buf.config.stacked_observations)
+            # We need legal actions for the re-search
+            legal = game.legal_actions[pos]
+            results.append((g_idx, pos, obs, legal))
+        
+        return results
+
+    def update_reanalyzed_stats(self, results: list):
+        """Apply fresh MCTS results back to buffer."""
+        for res in results:
+            self._buf.update_reanalyzed_stats(
+                res["game_idx"],
+                res["pos"],
+                res["policy"],
+                res["qvalues"],
+                res["actions"],
+                res["mask"],
+                res["root_value"]
+            )
+
     def get_size(self) -> int:
         return self._buf.size

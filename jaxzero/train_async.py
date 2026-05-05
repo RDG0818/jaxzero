@@ -25,11 +25,17 @@ def train_async(config: MAZeroConfig) -> dict:
         DataActor.remote(i, config, learner, replay_buffer)
         for i in range(config.num_actors)
     ]
+    reanalyze_actors = [
+        ReanalyzeActor.remote(i, config, learner, replay_buffer)
+        for i in range(config.num_reanalyze_actors)
+    ]
 
     # -- Warmup: fill buffer before training starts --
     target = config.min_replay_size
     print(f"Warming up: filling buffer to {target} games...")
     actor_tasks = {actor.run_episode.remote(): actor for actor in data_actors}
+    reanalyze_tasks = {actor.run_reanalyze.remote(): actor for actor in reanalyze_actors}
+
     while True:
         buf_size = ray.get(replay_buffer.get_size.remote())
         print(f"  Buffer: {buf_size}/{target}", end="\r", flush=True)
@@ -47,9 +53,9 @@ def train_async(config: MAZeroConfig) -> dict:
     total_steps = 0
     recent_returns: deque = deque(maxlen=100)
 
-    print("Starting async training loop...")
+    print(f"Starting async training loop with {len(data_actors)} data actors and {len(reanalyze_actors)} reanalyze actors...")
     while total_steps < config.training_steps:
-        all_pending = list(actor_tasks.keys()) + [learner_task]
+        all_pending = list(actor_tasks.keys()) + list(reanalyze_tasks.keys()) + [learner_task]
         done_refs, _ = ray.wait(all_pending, num_returns=1)
         done_ref = done_refs[0]
 
@@ -68,6 +74,10 @@ def train_async(config: MAZeroConfig) -> dict:
                     )
             if total_steps < config.training_steps:
                 learner_task = learner.run_training_loop.remote(config.learner_steps_per_call)
+
+        elif done_ref in reanalyze_tasks:
+            finished_reanalyze = reanalyze_tasks.pop(done_ref)
+            reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:
             ep_return = ray.get(done_ref)

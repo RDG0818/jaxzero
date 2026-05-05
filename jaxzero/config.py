@@ -70,6 +70,8 @@ class MAZeroConfig:
 
     # Async / Ray
     num_actors: int = 3
+    num_reanalyze_actors: int = 0  # Set >0 to enable async reanalysis
+    reanalyze_batch_size: int = 8
     param_update_interval: int = 1
     learner_steps_per_call: int = 10
 

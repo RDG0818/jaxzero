@@ -52,6 +52,12 @@ def main():
         default=None,
         help="Number of parallel DataActors for async training (default: 3)",
     )
+    parser.add_argument(
+        "--num_reanalyze",
+        type=int,
+        default=None,
+        help="Number of parallel ReanalyzeActors (default: 0)",
+    )
     args = parser.parse_args()
 
     # For async training, init Ray before JAX is imported (via env probe below).
@@ -80,6 +86,8 @@ def main():
         overrides["updates_per_collection"] = args.updates_per_collection
     if args.num_actors is not None:
         overrides["num_actors"] = args.num_actors
+    if args.num_reanalyze is not None:
+        overrides["num_reanalyze_actors"] = args.num_reanalyze
     config = MAZeroConfig(
         env_name=args.env,
         num_agents=probe.num_agents,
