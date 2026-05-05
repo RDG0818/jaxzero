@@ -82,3 +82,26 @@ def test_awpo_loss_shape():
     masks = jnp.ones((B, K))
     loss = awpo_sharp_loss(policy_logits, sampled_actions, visit_counts, advantages, masks, alpha=3.0)
     assert loss.shape == (B,)
+
+
+def test_awpo_loss_std_normalization():
+    """Advantages with larger variance should produce larger adv_weight spread."""
+    B, N, A, K = 1, 2, 5, 4
+    policy_logits = jnp.zeros((B, N, A))
+    sampled_actions = jnp.zeros((B, K, N), dtype=jnp.int32)
+    visit_counts = jnp.ones((B, K)) / K
+    masks = jnp.ones((B, K))
+
+    # Small variance advantages — same relative structure as large
+    small_adv = jnp.array([[0.1, 0.2, 0.1, 0.2]])   # std ≈ 0.05
+    # Large variance advantages — same relative structure, 10x scale
+    large_adv = jnp.array([[1.0, 2.0, 1.0, 2.0]])   # std ≈ 0.5
+
+    loss_small = awpo_sharp_loss(policy_logits, sampled_actions, visit_counts, small_adv, masks, alpha=3.0)
+    loss_large = awpo_sharp_loss(policy_logits, sampled_actions, visit_counts, large_adv, masks, alpha=3.0)
+
+    # With std normalization, both should produce similar loss magnitude
+    # (same relative structure → same normalized advantages → same loss)
+    assert jnp.abs(loss_small - loss_large).mean() < 0.01, (
+        f"Std normalization should make loss scale-invariant: small={loss_small}, large={loss_large}"
+    )

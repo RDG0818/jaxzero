@@ -27,8 +27,12 @@ def awpo_sharp_loss(
 
     joint_log_probs = jax.vmap(gather_joint_logprob)(log_probs, sampled_actions)  # (B, K)
 
-    masked_adv_mean = (advantages * masks).sum(-1, keepdims=True) / (masks.sum(-1, keepdims=True) + 1e-8)
-    adv_norm = advantages - masked_adv_mean
+    n_valid = masks.sum(-1, keepdims=True) + 1e-8
+    masked_adv_mean = (advantages * masks).sum(-1, keepdims=True) / n_valid
+    adv_centered = advantages - masked_adv_mean
+    masked_adv_var = (adv_centered ** 2 * masks).sum(-1, keepdims=True) / n_valid
+    masked_adv_std = jnp.sqrt(masked_adv_var + 1e-10)
+    adv_norm = adv_centered / (masked_adv_std + 1e-5)
     adv_weights = jnp.exp(adv_norm / alpha)
 
     return -(joint_log_probs * visit_counts * adv_weights * masks).sum(axis=-1)
