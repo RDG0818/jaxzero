@@ -67,6 +67,11 @@ class MAZeroConfig:
     num_envs_parallel: int = 8
     updates_per_collection: int = 2
 
+    # Async / Ray
+    num_actors: int = 3
+    param_update_interval: int = 1
+    learner_steps_per_call: int = 10
+
     # Logging / eval
     eval_interval: int = 1000
     eval_episodes: int = 32
