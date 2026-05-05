@@ -9,8 +9,7 @@ class LearnerActor:
     """Owns model params + optimizer on GPU. Trains and serves params to DataActors."""
 
     def __init__(self, config: MAZeroConfig, replay_buffer_actor):
-        # Must set BEFORE any JAX import
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # Respect Ray's CUDA_VISIBLE_DEVICES assignment
         os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
         os.environ.setdefault("OMP_NUM_THREADS", "4")
 

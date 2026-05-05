@@ -8,6 +8,7 @@ class ReplayBufferActor:
 
     def __init__(self, config: MAZeroConfig):
         import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ["JAX_PLATFORMS"] = "cpu"
         from jaxzero.replay_buffer import PrioritizedReplayBuffer
         self._buf = PrioritizedReplayBuffer(config)
