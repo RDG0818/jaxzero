@@ -120,6 +120,9 @@ class GameHistory:
 
         policies_batch = np.stack([self.sampled_policies[min(pos + k, T - 1)] for k in range(unroll_steps + 1)])
         qvals_batch = np.stack([self.sampled_qvalues[min(pos + k, T - 1)] for k in range(unroll_steps + 1)])
-        masks_batch = np.stack([self.sampled_masks[min(pos + k, T - 1)] for k in range(unroll_steps + 1)])
+        masks_batch = np.stack([
+            self.sampled_masks[pos + k] if pos + k < T else np.zeros(K, dtype=bool)
+            for k in range(unroll_steps + 1)
+        ])
 
         return obs_batch, actions_batch, rewards_batch, values_batch, policies_batch, qvals_batch, masks_batch
