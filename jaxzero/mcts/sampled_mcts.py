@@ -35,9 +35,17 @@ class SampledMCTS:
         self.model = model
 
         self._jit_initial = jax.jit(model.apply)
-        self._jit_recurrent = jax.jit(
-            lambda p, h, a: model.apply(p, h, a, method=model.recurrent_inference)
-        )
+        
+        def _recurrent_step(params, hidden_pool, ix, batch_actions):
+            # hidden_pool: (N_pool, B, N_agents, D)
+            # ix: (B,) indices into N_pool
+            # Gather hidden states: (B, N_agents, D)
+            # Use jnp.take to index into the first dimension (pool)
+            h = jax.vmap(lambda p, i: p[i])(hidden_pool.transpose(1, 0, 2, 3), ix)
+            out = model.apply(params, h, batch_actions, method=model.recurrent_inference)
+            return out
+
+        self._jit_recurrent = jax.jit(_recurrent_step)
 
         value_support = config.value_support_size
         reward_support = config.reward_support_size
@@ -82,7 +90,7 @@ class SampledMCTS:
         out0 = self._jit_initial(params, jnp.array(obs))
         values0 = np.array(self._jit_val(out0.value_logits), dtype=np.float32)   # (B,)
         policy0 = np.array(out0.policy_logits)                                    # (B, N, A)
-        hidden0 = np.array(out0.hidden_state)                                     # (B, N, D)
+        hidden0 = out0.hidden_state                                              # (B, N, D) - KEEP ON GPU
 
         # Legal-masked softmax for root policy
         policy_probs = self._softmax_legal(policy0, legal)  # (B, N, A)
@@ -115,32 +123,36 @@ class SampledMCTS:
         rewards0 = np.zeros(B, dtype=np.float32)
         trees.prepare(rewards0, values0, policy_probs, beta, K, noise_eps, noises)
 
-        # hidden_states_pool[i] has shape (B, N, D)
-        hidden_states_pool = [hidden0]
-
         # --- Simulation loop ---
-        N_agents = obs.shape[1]
+        # Pre-allocate buffer on GPU for all simulation steps
+        # Shape: (num_simulations + 1, B, N, D)
         D = hidden0.shape[-1]
-        hidden_buf = np.empty((B, N_agents, D), dtype=np.float32)
+        pool_jnp = jnp.zeros((cfg.num_simulations + 1, B, cfg.num_agents, D), dtype=jnp.float32)
+        pool_jnp = pool_jnp.at[0].set(hidden0)
 
         for sim in range(cfg.num_simulations):
-            ix_lst, iy_lst, batch_actions = trees.batch_selection(
+            ix_lst, _, batch_actions = trees.batch_selection(
                 cfg.pb_c_base, cfg.pb_c_init, cfg.discount
             )
-            # Gather hidden states for each env from the pool
-            for b, (ix, iy) in enumerate(zip(ix_lst, iy_lst)):
-                hidden_buf[b] = hidden_states_pool[ix][iy]
+            # ix_lst: list of length B, values 0..sim
+            ix_jnp = jnp.array(ix_lst)
 
             rec_out = self._jit_recurrent(
-                params, jnp.array(hidden_buf), jnp.array(batch_actions)
+                params, pool_jnp, ix_jnp, jnp.array(batch_actions)
             )
+            
+            # These transfers are still needed for ctree (C++), but small (scalars/logits)
             rec_rewards = np.array(self._jit_rew(rec_out.reward_logits), dtype=np.float32)  # (B,)
             rec_values = np.array(self._jit_val(rec_out.value_logits), dtype=np.float32)    # (B,)
             rec_policy = np.array(rec_out.policy_logits)                                    # (B, N, A)
-            rec_hidden = np.array(rec_out.hidden_state)                                     # (B, N, D)
+            
+            # Keep hidden state on GPU
+            rec_hidden = rec_out.hidden_state                                               # (B, N, D)
 
             rec_probs = self._softmax(rec_policy)  # no legal masking at non-root
-            hidden_states_pool.append(rec_hidden)
+            
+            # Update pool on GPU
+            pool_jnp = pool_jnp.at[sim + 1].set(rec_hidden)
 
             trees.batch_expansion_and_backup(
                 sim + 1, cfg.discount, K,

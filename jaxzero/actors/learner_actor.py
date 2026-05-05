@@ -41,6 +41,7 @@ class LearnerActor:
         self.optimizer = optimizer
         self.update_fn = make_update_fn(net, config)
         self.reanalyze_worker = ReanalyzeWorker(config=config, model=net)
+        self.target_params = self.params
 
     def get_params(self):
         """Return params as numpy — safe to send across Ray process boundaries."""
@@ -52,6 +53,9 @@ class LearnerActor:
         losses, r_losses, v_losses, p_losses = [], [], [], []
 
         for _ in range(num_steps):
+            if self.step % cfg.target_model_interval == 0:
+                self.target_params = self.params
+
             beta = min(
                 1.0,
                 cfg.priority_beta_start
@@ -61,7 +65,8 @@ class LearnerActor:
             if ctx is None:
                 break
 
-            batch = self.reanalyze_worker.make_batch(ctx, self.params)
+            # Targets are computed using target_params to stabilize bootstrap
+            batch = self.reanalyze_worker.make_batch(ctx, self.target_params)
             loss, grads, aux, priorities = self.update_fn(self.params, batch)
             updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
             self.params = self._optax.apply_updates(self.params, updates)

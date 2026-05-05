@@ -1,3 +1,5 @@
+sequential-muzero/
+MAZero/
 __pycache__/
 *.pyc
 *.pyo
