@@ -29,8 +29,8 @@ def awpo_sharp_loss(
 
     n_valid = masks.sum(-1, keepdims=True) + 1e-8
     masked_adv_mean = (advantages * masks).sum(-1, keepdims=True) / n_valid
-    adv_centered = advantages - masked_adv_mean
-    masked_adv_var = (adv_centered ** 2 * masks).sum(-1, keepdims=True) / n_valid
+    adv_centered = (advantages - masked_adv_mean) * masks  # zero invalid → no exp(huge) NaN
+    masked_adv_var = (adv_centered ** 2).sum(-1, keepdims=True) / n_valid
     masked_adv_std = jnp.sqrt(masked_adv_var + 1e-10)
     adv_norm = adv_centered / (masked_adv_std + 1e-5)
     adv_weights = jnp.exp(adv_norm / alpha)
