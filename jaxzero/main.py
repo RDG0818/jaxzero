@@ -41,6 +41,17 @@ def main():
         default=None,
         help="Gradient updates per collection round (default: 10)",
     )
+    parser.add_argument(
+        "--async_training",
+        action="store_true",
+        help="Use Ray async actor-learner training (DataActors on CPU + LearnerActor on GPU)",
+    )
+    parser.add_argument(
+        "--num_actors",
+        type=int,
+        default=None,
+        help="Number of parallel DataActors for async training (default: 3)",
+    )
     args = parser.parse_args()
 
     # Build env factory and probe one instance for dimensions
@@ -59,6 +70,8 @@ def main():
         overrides["num_envs_parallel"] = args.num_envs
     if args.updates_per_collection is not None:
         overrides["updates_per_collection"] = args.updates_per_collection
+    if args.num_actors is not None:
+        overrides["num_actors"] = args.num_actors
     config = MAZeroConfig(
         env_name=args.env,
         num_agents=probe.num_agents,
@@ -71,8 +84,12 @@ def main():
         **overrides,
     )
 
-    from jaxzero.train import train
-    params = train(config, env_fn)
+    if args.async_training:
+        from jaxzero.train_async import train_async
+        params = train_async(config)
+    else:
+        from jaxzero.train import train
+        params = train(config, env_fn)
     print("Training complete.")
 
 
