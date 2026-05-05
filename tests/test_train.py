@@ -49,7 +49,7 @@ def test_update_fn_runs():
     params = net.init(jax.random.PRNGKey(0), obs_init)
     update_fn = make_update_fn(net, config)
     batch = make_fake_batch(config)
-    loss, grads = jax.value_and_grad(update_fn)(params, batch)
+    loss, grads, aux = update_fn(params, batch)
     assert jnp.isfinite(loss)
 
 
@@ -65,13 +65,32 @@ def test_loss_decreases_on_repeated_batch():
     batch = make_fake_batch(config)
 
     losses = []
-    for _ in range(10):
-        loss, grads = jax.value_and_grad(update_fn)(params, batch)
+    for _ in range(20):
+        loss, grads, aux = update_fn(params, batch)
         losses.append(float(loss))
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
 
     assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+
+def test_update_fn_returns_aux():
+    """make_update_fn should return (loss, grads, aux) with per-component losses."""
+    config = make_config()
+    net = MAMuZeroNet(config=config)
+    obs_init = jnp.ones((1, N, OBS_DIM))
+    params = net.init(jax.random.PRNGKey(0), obs_init)
+    update_fn = make_update_fn(net, config)
+    batch = make_fake_batch(config)
+
+    result = update_fn(params, batch)
+    assert len(result) == 3, "update_fn should return (loss, grads, aux)"
+    loss, grads, aux = result
+    assert jnp.isfinite(loss)
+    assert "reward_loss" in aux
+    assert "value_loss" in aux
+    assert "policy_loss" in aux
+    assert all(jnp.isfinite(v) for v in aux.values())
 
 
 def test_awpo_loss_shape():

@@ -57,12 +57,11 @@ def _batch_phi_h(vals: jnp.ndarray, S: int) -> jnp.ndarray:
 
 
 def make_update_fn(model, config: MAZeroConfig):
-    """Create a JIT-able pure loss function (params, batch) -> scalar_loss."""
+    """Create a pure (params, batch) -> (loss, grads, aux) update function."""
     S_v = config.value_support_size
     S_r = config.reward_support_size
 
-    @jax.jit
-    def update_fn(params: Any, batch: BatchData) -> jnp.ndarray:
+    def _loss_fn(params: Any, batch: BatchData):
         obs = jnp.array(batch.obs)                         # (B, U+1, N, obs_dim)
         actions = jnp.array(batch.actions)                 # (B, U, N)
         target_rewards = jnp.array(batch.target_rewards)   # (B, U)
@@ -75,53 +74,62 @@ def make_update_fn(model, config: MAZeroConfig):
 
         U = config.unroll_steps
 
-        # Initial inference: obs[:, 0] shape (B, N, obs_dim)
         out0 = model.apply(params, obs[:, 0])
-        target_v0 = _batch_phi_h(target_values[:, 0], S_v)  # (B, 2*S_v+1)
+        target_v0 = _batch_phi_h(target_values[:, 0], S_v)
 
-        value_loss = categorical_cross_entropy(out0.value_logits, target_v0)   # (B,)
-        reward_loss = jnp.zeros(obs.shape[0])                                   # (B,)
+        value_loss = categorical_cross_entropy(out0.value_logits, target_v0)
+        reward_loss = jnp.zeros(obs.shape[0])
         policy_loss = awpo_sharp_loss(
-            out0.policy_logits,      # (B, N, A)
-            sampled_acts[:, 0],      # (B, K, N)
-            target_policies[:, 0],   # (B, K)
-            target_qvalues[:, 0],    # (B, K)
-            target_masks[:, 0],      # (B, K)
+            out0.policy_logits,
+            sampled_acts[:, 0],
+            target_policies[:, 0],
+            target_qvalues[:, 0],
+            target_masks[:, 0],
             config.awpo_alpha,
-        )  # (B,)
+        )
 
-        hidden = out0.hidden_state  # (B, N, D)
+        hidden = out0.hidden_state
 
         for k in range(1, U + 1):
-            # Half-gradient trick: scale gradient contribution from hidden state
             hidden = 0.5 * hidden + 0.5 * lax.stop_gradient(hidden)
             out_k = model.apply(
                 params, hidden, actions[:, k - 1],
                 method=model.recurrent_inference,
             )
 
-            target_r = _batch_phi_h(target_rewards[:, k - 1], S_r)  # (B, 2*S_r+1)
-            target_v = _batch_phi_h(target_values[:, k], S_v)        # (B, 2*S_v+1)
+            target_r = _batch_phi_h(target_rewards[:, k - 1], S_r)
+            target_v = _batch_phi_h(target_values[:, k], S_v)
 
             reward_loss = reward_loss + categorical_cross_entropy(out_k.reward_logits, target_r)
             value_loss = value_loss + categorical_cross_entropy(out_k.value_logits, target_v)
             policy_loss = policy_loss + awpo_sharp_loss(
-                out_k.policy_logits,     # (B, N, A)
-                sampled_acts[:, k],      # (B, K, N)
-                target_policies[:, k],   # (B, K)
-                target_qvalues[:, k],    # (B, K)
-                target_masks[:, k],      # (B, K)
+                out_k.policy_logits,
+                sampled_acts[:, k],
+                target_policies[:, k],
+                target_qvalues[:, k],
+                target_masks[:, k],
                 config.awpo_alpha,
             )
 
             hidden = out_k.hidden_state
 
-        total = (
-            config.reward_loss_coeff * reward_loss
-            + config.value_loss_coeff * value_loss
-            + config.policy_loss_coeff * policy_loss
-        )
-        return (weights * total).mean() / U
+        r_term = config.reward_loss_coeff * reward_loss
+        v_term = config.value_loss_coeff * value_loss
+        p_term = config.policy_loss_coeff * policy_loss
+        total = r_term + v_term + p_term
+        scalar = (weights * total).mean() / U
+        aux = {
+            "reward_loss": (weights * r_term).mean() / U,
+            "value_loss": (weights * v_term).mean() / U,
+            "policy_loss": (weights * p_term).mean() / U,
+        }
+        return scalar, aux
+
+    _grad_fn = jax.jit(jax.value_and_grad(_loss_fn, has_aux=True))
+
+    def update_fn(params: Any, batch: BatchData):
+        (loss, aux), grads = _grad_fn(params, batch)
+        return loss, grads, aux
 
     return update_fn
 
@@ -300,13 +308,19 @@ def train(config: MAZeroConfig, env_fn):
             ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
             batch = reanalyze_worker.make_batch(ctx, params)
 
-            loss, grads = jax.value_and_grad(update_fn)(params, batch)
+            loss, grads, aux = update_fn(params, batch)
             updates, opt_state = optimizer.update(grads, opt_state)
             params = optax.apply_updates(params, updates)
 
             if step % config.log_interval == 0:
                 mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
-                print(f"Step {step}: loss={float(loss):.4f} | ep_return={mean_ret:.2f}")
+                print(
+                    f"Step {step}: loss={float(loss):.4f}"
+                    f" | r={float(aux['reward_loss']):.3f}"
+                    f" v={float(aux['value_loss']):.3f}"
+                    f" p={float(aux['policy_loss']):.3f}"
+                    f" | ep_return={mean_ret:.2f}"
+                )
 
             step += 1
             if step >= config.training_steps:
