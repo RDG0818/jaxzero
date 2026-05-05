@@ -65,7 +65,7 @@ class MAZeroConfig:
 
     # Collection
     num_envs_parallel: int = 8
-    updates_per_collection: int = 10
+    updates_per_collection: int = 2
 
     # Logging / eval
     eval_interval: int = 1000
