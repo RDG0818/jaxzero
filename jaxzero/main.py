@@ -54,6 +54,14 @@ def main():
     )
     args = parser.parse_args()
 
+    # For async training, init Ray before JAX is imported (via env probe below).
+    # Ray workers fork from main process; if JAX is already initialized in main, the
+    # fork copies JAX state into workers → deadlock. Initializing Ray first ensures
+    # workers fork from a JAX-free parent.
+    if args.async_training:
+        import ray
+        ray.init(ignore_reinit_error=True)
+
     # Build env factory and probe one instance for dimensions
     if args.env == "3m":
         from jaxzero.envs.smax_wrapper import SMAXWrapper
