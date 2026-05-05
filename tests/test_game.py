@@ -60,27 +60,23 @@ def test_make_target_shapes():
 
 def test_make_target_out_of_episode_masks_are_zero():
     """Steps past episode end must have all-False masks (no policy loss contribution)."""
-    from jaxzero.game import GameHistory
-    import numpy as np
-
     K, N, A, S = 5, 2, 3, 1
     game = GameHistory(num_agents=N, obs_dim=4, action_space_size=A, stacked_observations=S)
 
     # 3-step episode
     for t in range(3):
         game.store_observation(np.zeros((N, 4)))
-        if t < 3:
-            game.store_action(np.zeros(N, dtype=np.int32))
-            game.store_reward(1.0)
-            game.store_root_value(0.5)
-            game.store_pred_value(0.0)
-            game.store_legal_actions(np.ones((N, A), dtype=bool))
-            game.store_search_stats(
-                sampled_actions=np.zeros((K, N), dtype=np.int32),
-                visit_counts=np.ones(K) / K,
-                qvalues=np.zeros(K),
-                mask=np.ones(K, dtype=bool),
-            )
+        game.store_action(np.zeros(N, dtype=np.int32))
+        game.store_reward(1.0)
+        game.store_root_value(0.5)
+        game.store_pred_value(0.0)
+        game.store_legal_actions(np.ones((N, A), dtype=bool))
+        game.store_search_stats(
+            sampled_actions=np.zeros((K, N), dtype=np.int32),
+            visit_counts=np.ones(K) / K,
+            qvalues=np.zeros(K),
+            mask=np.ones(K, dtype=bool),
+        )
 
     # pos=1, unroll_steps=5 → steps k=2,3,4,5 go past T=3
     _, _, _, _, _, _, masks_batch = game.make_target(
