@@ -25,7 +25,7 @@ class DataActor:
 
     def __init__(self, actor_id: int, config: MAZeroConfig, learner_actor, replay_buffer_actor):
         # Must set BEFORE any JAX import
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ["JAX_PLATFORMS"] = "cpu"
         os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
         os.environ.setdefault("OMP_NUM_THREADS", "2")
         os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")

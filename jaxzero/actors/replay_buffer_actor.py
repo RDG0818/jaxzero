@@ -7,6 +7,8 @@ class ReplayBufferActor:
     """PrioritizedReplayBuffer in an isolated Ray process. No JAX required."""
 
     def __init__(self, config: MAZeroConfig):
+        import os
+        os.environ["JAX_PLATFORMS"] = "cpu"
         from jaxzero.replay_buffer import PrioritizedReplayBuffer
         self._buf = PrioritizedReplayBuffer(config)
 
