@@ -60,45 +60,103 @@ class ReanalyzeWorker:
         games, positions, indices, weights = buffer_context
         B = len(games)
         U = self.config.unroll_steps
+        K = self.config.sampled_action_times
+        N = self.config.num_agents
 
-        obs_list, actions_list, rewards_list, values_list = [], [], [], []
-        policies_list, qvals_list, masks_list, sampled_actions_list = [], [], [], []
+        re_num = int(np.ceil(B * self.config.revisit_policy_search_rate))
+        if self._mcts is None:
+            re_num = 0
+
+        fresh_policies = None
+        fresh_qvalues = None
+        fresh_masks = None
+        fresh_sa = None
+
+        if re_num > 0:
+            obs_list, legal_list = [], []
+            for b in range(re_num):
+                game = games[b]
+                pos = int(positions[b])
+                T = len(game)
+                for k in range(U + 1):
+                    t = min(pos + k, T - 1)
+                    obs_list.append(game.obs(t, self.config.stacked_observations))
+                    legal_list.append(game.legal_actions[t])
+
+            obs_np = np.stack(obs_list)     # (re_num*(U+1), N, obs_size)
+            legal_np = np.stack(legal_list) # (re_num*(U+1), N, A)
+
+            result = self._mcts.search(params, obs_np, legal_np, self._rng)
+
+            fp = np.zeros((re_num, U + 1, K), dtype=np.float32)
+            fq = np.zeros((re_num, U + 1, K), dtype=np.float32)
+            fm = np.zeros((re_num, U + 1, K), dtype=bool)
+            fsa = np.zeros((re_num, U + 1, K, N), dtype=np.int32)
+
+            for flat_idx in range(re_num * (U + 1)):
+                b = flat_idx // (U + 1)
+                k = flat_idx % (U + 1)
+                pol, sa, qv, mask = _pad_to_k(
+                    result.sampled_visit_counts[flat_idx],
+                    result.sampled_actions[flat_idx],
+                    result.sampled_qvalues[flat_idx],
+                    K, N,
+                )
+                fp[b, k] = pol
+                fsa[b, k] = sa
+                fq[b, k] = qv
+                fm[b, k] = mask
+
+            fresh_policies = fp
+            fresh_qvalues = fq
+            fresh_masks = fm
+            fresh_sa = fsa
+
+        obs_list_out, actions_list_out, rewards_list_out = [], [], []
+        values_list_out, policies_list_out, qvals_list_out = [], [], []
+        masks_list_out, sa_list_out = [], []
 
         for b in range(B):
-            game: GameHistory = games[b]
+            game = games[b]
             pos = int(positions[b])
+            T = len(game)
+
             obs_b, act_b, rew_b, val_b, pol_b, qv_b, mask_b = game.make_target(
                 pos=pos,
                 unroll_steps=U,
                 td_steps=self.config.td_steps,
                 discount=self.config.discount,
             )
-            # Gather sampled_actions for AWPO: (U+1, K, N)
-            T = len(game)
-            K = len(game.sampled_actions[0])
-            sa_b = np.stack([
-                game.sampled_actions[min(pos + k, T - 1)]
-                for k in range(U + 1)
-            ])  # (U+1, K, N)
 
-            obs_list.append(obs_b)
-            actions_list.append(act_b)
-            rewards_list.append(rew_b)
-            values_list.append(val_b)
-            policies_list.append(pol_b)
-            qvals_list.append(qv_b)
-            masks_list.append(mask_b)
-            sampled_actions_list.append(sa_b)
+            if b < re_num and fresh_policies is not None:
+                pol_b = fresh_policies[b]
+                qv_b = fresh_qvalues[b]
+                mask_b = fresh_masks[b]
+                sa_b = fresh_sa[b]
+            else:
+                sa_b = np.stack([
+                    game.sampled_actions[min(pos + k, T - 1)]
+                    for k in range(U + 1)
+                ])
+
+            obs_list_out.append(obs_b)
+            actions_list_out.append(act_b)
+            rewards_list_out.append(rew_b)
+            values_list_out.append(val_b)
+            policies_list_out.append(pol_b)
+            qvals_list_out.append(qv_b)
+            masks_list_out.append(mask_b)
+            sa_list_out.append(sa_b)
 
         return BatchData(
-            obs=np.stack(obs_list),
-            actions=np.stack(actions_list),
-            target_rewards=np.stack(rewards_list),
-            target_values=np.stack(values_list),
-            target_policies=np.stack(policies_list),
-            target_qvalues=np.stack(qvals_list),
-            target_masks=np.stack(masks_list),
-            sampled_actions=np.stack(sampled_actions_list),
+            obs=np.stack(obs_list_out),
+            actions=np.stack(actions_list_out),
+            target_rewards=np.stack(rewards_list_out),
+            target_values=np.stack(values_list_out),
+            target_policies=np.stack(policies_list_out),
+            target_qvalues=np.stack(qvals_list_out),
+            target_masks=np.stack(masks_list_out),
+            sampled_actions=np.stack(sa_list_out),
             weights=weights,
             indices=indices,
         )

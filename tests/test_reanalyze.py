@@ -3,11 +3,22 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
+from typing import NamedTuple
+from unittest.mock import patch, MagicMock
 from jaxzero.config import MAZeroConfig
 from jaxzero.model.networks import MAMuZeroNet
 from jaxzero.game import GameHistory
 from jaxzero.replay_buffer import PrioritizedReplayBuffer
 from jaxzero.reanalyze import ReanalyzeWorker, BatchData, _pad_to_k
+
+
+class SearchOutput(NamedTuple):
+    """Mirrors jaxzero.mcts.sampled_mcts.SearchOutput without importing cytree."""
+    root_value: np.ndarray
+    sampled_actions: list
+    sampled_visit_counts: list
+    sampled_qvalues: list
+    sampled_imp_ratio: list = []
 
 
 B, N, A, OBS_DIM = 4, 3, 9, 80 * 4
@@ -150,4 +161,80 @@ def test_policy_loss_no_gradient_through_value_baseline():
     value_out_kernel = grads['params']['prediction_net']['value_mlp']['output']['kernel']
     assert np.allclose(value_out_kernel, 0.0, atol=1e-6), (
         f"Policy gradient leaked into value_mlp output kernel. max={np.abs(value_out_kernel).max():.2e}"
+    )
+
+
+def _make_mock_search_result(B_flat, K, N):
+    """Returns a SearchOutput where each position has K uniform visits to action 0."""
+    return SearchOutput(
+        root_value=np.zeros(B_flat, dtype=np.float32),
+        sampled_actions=[np.zeros((K, N), dtype=np.int32) for _ in range(B_flat)],
+        sampled_visit_counts=[np.ones(K, dtype=np.float32) for _ in range(B_flat)],
+        sampled_qvalues=[np.full(K, 99.0, dtype=np.float32) for _ in range(B_flat)],
+        sampled_imp_ratio=[np.ones(K, dtype=np.float32) for _ in range(B_flat)],
+    )
+
+
+def test_reanalysis_replaces_stored_policy_targets():
+    """When use_reanalyze=True, make_batch must use fresh MCTS targets, not stored ones."""
+    import sys
+
+    config = make_config(use_reanalyze=True)
+    net = MAMuZeroNet(config=config)
+    params = net.init(jax.random.PRNGKey(0), np.ones((1, N, OBS_DIM), dtype=np.float32))
+
+    U = config.unroll_steps
+    B_flat = B * (U + 1)  # all positions in one MCTS call
+
+    mock_result = _make_mock_search_result(B_flat, K, N)
+
+    # cytree is compiled for Python 3.10; mock the whole sampled_mcts module so
+    # the local import inside ReanalyzeWorker.__init__ doesn't hit cytree.
+    mock_mcts_instance = MagicMock()
+    mock_mcts_instance.search.return_value = mock_result
+
+    mock_sampled_mcts_module = MagicMock()
+    mock_sampled_mcts_module.SampledMCTS.return_value = mock_mcts_instance
+
+    with patch.dict(sys.modules, {'jaxzero.mcts.sampled_mcts': mock_sampled_mcts_module}):
+        worker = ReanalyzeWorker(config=config, model=net)
+        assert worker._mcts is not None
+
+        ctx = make_buffer_ctx(config)
+        batch = worker.make_batch(ctx, params)
+
+    mock_mcts_instance.search.assert_called_once()
+    call_obs = mock_mcts_instance.search.call_args[0][1]   # second positional arg = obs
+    assert call_obs.shape == (B_flat, N, OBS_DIM), (
+        f"Expected obs shape ({B_flat}, {N}, {OBS_DIM}), got {call_obs.shape}"
+    )
+
+    # Q-values must be 99.0 (from mock), not stored random values
+    assert np.all(batch.target_qvalues == 99.0), (
+        f"Reanalyzed Q-values should be 99.0 but got: {batch.target_qvalues[:2, 0, :3]}"
+    )
+
+    # Visit counts must be uniform 1/K (mock returns ones, normalized)
+    expected_pol = 1.0 / K
+    np.testing.assert_allclose(batch.target_policies, expected_pol, atol=1e-5)
+
+
+def test_no_reanalysis_uses_stored_targets():
+    """When use_reanalyze=False, make_batch must NOT call MCTS."""
+    config = make_config(use_reanalyze=False)
+    net = MAMuZeroNet(config=config)
+    params = net.init(jax.random.PRNGKey(0), np.ones((1, N, OBS_DIM), dtype=np.float32))
+
+    worker = ReanalyzeWorker(config=config, model=net)
+    assert worker._mcts is None  # no MCTS when use_reanalyze=False
+
+    ctx = make_buffer_ctx(config)
+    games, positions, _, _ = ctx
+    stored_qvals_0 = games[0].sampled_qvalues[int(positions[0])]
+
+    batch = worker.make_batch(ctx, params)
+
+    np.testing.assert_array_equal(
+        batch.target_qvalues[0, 0],
+        stored_qvals_0,
     )
