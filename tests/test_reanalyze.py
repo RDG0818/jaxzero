@@ -7,7 +7,7 @@ from jaxzero.config import MAZeroConfig
 from jaxzero.model.networks import MAMuZeroNet
 from jaxzero.game import GameHistory
 from jaxzero.replay_buffer import PrioritizedReplayBuffer
-from jaxzero.reanalyze import ReanalyzeWorker, BatchData
+from jaxzero.reanalyze import ReanalyzeWorker, BatchData, _pad_to_k
 
 
 B, N, A, OBS_DIM = 4, 3, 9, 80 * 4
@@ -52,6 +52,40 @@ def make_buffer_ctx(config):
     for _ in range(10):
         buf.add(make_game())
     return buf.prepare_batch_context(B, beta=0.4)
+
+
+def test_pad_to_k_pads_shorter():
+    visits = np.array([10.0, 5.0, 3.0], dtype=np.float32)
+    actions = np.array([[0, 1, 2], [1, 0, 2], [2, 1, 0]], dtype=np.int32)  # (3, N=3)
+    qvals = np.array([1.0, 0.5, 0.2], dtype=np.float32)
+    K, N_agents = 5, 3
+
+    pol, sa, qv, mask = _pad_to_k(visits, actions, qvals, K, N_agents)
+
+    assert pol.shape == (K,)
+    assert sa.shape == (K, N_agents)
+    assert qv.shape == (K,)
+    assert mask.shape == (K,)
+    assert mask.dtype == bool
+    # first 3 valid, last 2 padded
+    assert mask[:3].all() and not mask[3:].any()
+    # visit counts normalized to sum=1 over valid entries
+    np.testing.assert_allclose(pol[:3].sum(), 1.0, atol=1e-5)
+    # padded entries are zero
+    assert pol[3:].sum() == 0.0
+    assert sa[3:].sum() == 0
+
+
+def test_pad_to_k_exact_k():
+    visits = np.array([4.0, 3.0, 2.0, 1.0, 0.5], dtype=np.float32)
+    actions = np.zeros((5, 2), dtype=np.int32)
+    qvals = np.zeros(5, dtype=np.float32)
+    K, N_agents = 5, 2
+
+    pol, sa, qv, mask = _pad_to_k(visits, actions, qvals, K, N_agents)
+
+    assert mask.all()
+    np.testing.assert_allclose(pol.sum(), 1.0, atol=1e-5)
 
 
 def test_batch_shapes_no_reanalyze():

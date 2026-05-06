@@ -4,6 +4,34 @@ from jaxzero.config import MAZeroConfig
 from jaxzero.game import GameHistory
 
 
+def _pad_to_k(
+    visits: np.ndarray,   # (K_actual,) float32 visit counts, K_actual <= K
+    actions: np.ndarray,  # (K_actual, N) int32 joint actions
+    qvals: np.ndarray,    # (K_actual,) float32 Q-values
+    K: int,               # target width
+    N: int,               # number of agents
+) -> tuple:
+    """Pad ctree outputs to fixed width K. Returns (pol, sa, qv, mask).
+
+    pol:  (K,) float32 — normalized visit counts (sum=1 over valid entries, 0 for padded)
+    sa:   (K, N) int32 — sampled joint actions (padded with zeros)
+    qv:   (K,) float32 — Q-values (padded with zeros)
+    mask: (K,) bool    — True for real entries, False for padding
+    """
+    K_actual = len(visits)
+    pol = np.zeros(K, dtype=np.float32)
+    sa = np.zeros((K, N), dtype=np.int32)
+    qv = np.zeros(K, dtype=np.float32)
+    mask = np.zeros(K, dtype=bool)
+
+    pol[:K_actual] = visits[:K_actual] / (visits[:K_actual].sum() + 1e-8)
+    sa[:K_actual] = actions[:K_actual]
+    qv[:K_actual] = qvals[:K_actual]
+    mask[:K_actual] = True
+
+    return pol, sa, qv, mask
+
+
 class BatchData(NamedTuple):
     obs: np.ndarray              # (B, U+1, N, obs_dim)
     actions: np.ndarray          # (B, U, N)
