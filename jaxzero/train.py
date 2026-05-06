@@ -5,7 +5,7 @@ import optax
 import numpy as np
 from typing import Any
 from jaxzero.config import MAZeroConfig
-from jaxzero.model.transforms import h, inv_h, phi, phi_inv
+from jaxzero.model.transforms import h, phi, phi_inv
 from jaxzero.reanalyze import BatchData
 
 
@@ -101,8 +101,7 @@ def make_update_fn(model, config: MAZeroConfig):
         # Subtracting V_net before batch normalization ensures the advantage signal
         # is zero-mean at each state, preventing high-value states from dominating
         # the batch statistics and corrupting the AWPO gradient.
-        # CRITICAL: must apply inv_h() to bring prediction into the same scale as raw target_qvalues.
-        v_pred_0 = inv_h(phi_inv(lax.stop_gradient(out0.value_logits), S_v))  # (B,)
+        v_pred_0 = phi_inv(lax.stop_gradient(out0.value_logits), S_v)  # (B,)
         adv_0 = target_qvalues[:, 0] - v_pred_0[:, None]  # (B, K)
         policy_loss = awpo_sharp_loss(
             out0.policy_logits,
@@ -130,7 +129,7 @@ def make_update_fn(model, config: MAZeroConfig):
             reward_loss = reward_loss + categorical_cross_entropy(out_k.reward_logits, target_r)
             value_loss = value_loss + categorical_cross_entropy(out_k.value_logits, target_v)
 
-            v_pred_k = inv_h(phi_inv(lax.stop_gradient(out_k.value_logits), S_v))  # (B,)
+            v_pred_k = phi_inv(lax.stop_gradient(out_k.value_logits), S_v)  # (B,)
             adv_k = target_qvalues[:, k] - v_pred_k[:, None]  # (B, K)
             policy_loss = policy_loss + awpo_sharp_loss(
                 out_k.policy_logits,
