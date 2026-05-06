@@ -128,7 +128,7 @@ class ReanalyzeWorker:
                 discount=self.config.discount,
             )
 
-            if b < re_num and fresh_policies is not None:
+            if b < re_num:
                 pol_b = fresh_policies[b]
                 qv_b = fresh_qvalues[b]
                 mask_b = fresh_masks[b]

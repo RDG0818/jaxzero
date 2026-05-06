@@ -101,15 +101,15 @@ def test_pad_to_k_exact_k():
 
 def test_pad_to_k_empty():
     """K_actual=0: all-zero pol, all-False mask."""
-    K, N = 5, 3
+    K, N_agents = 5, 3
     pol, actions, qvals, mask = _pad_to_k(
         np.array([], dtype=np.float32),
-        np.zeros((0, N), dtype=np.int32),
+        np.zeros((0, N_agents), dtype=np.int32),
         np.array([], dtype=np.float32),
-        K, N,
+        K, N_agents,
     )
     assert pol.shape == (K,)
-    assert actions.shape == (K, N)
+    assert actions.shape == (K, N_agents)
     assert qvals.shape == (K,)
     assert mask.shape == (K,)
     assert not mask.any()
@@ -180,6 +180,7 @@ def test_reanalysis_replaces_stored_policy_targets():
     import sys
 
     config = make_config(use_reanalyze=True)
+    config = dataclasses.replace(config, revisit_policy_search_rate=1.0)
     net = MAMuZeroNet(config=config)
     params = net.init(jax.random.PRNGKey(0), np.ones((1, N, OBS_DIM), dtype=np.float32))
 
