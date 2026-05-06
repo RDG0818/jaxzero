@@ -1,5 +1,7 @@
+import dataclasses
 import numpy as np
 import jax
+import jax.numpy as jnp
 import pytest
 from jaxzero.config import MAZeroConfig
 from jaxzero.model.networks import MAMuZeroNet
@@ -70,3 +72,31 @@ def test_batch_shapes_no_reanalyze():
     assert batch.target_masks.shape == (B, U + 1, K)
     assert batch.sampled_actions.shape == (B, U + 1, K, N)
     assert batch.weights.shape == (B,)
+
+
+def test_policy_loss_no_gradient_through_value_baseline():
+    """Policy gradient must not flow through V_net baseline into value params."""
+    from jaxzero.train import make_update_fn
+
+    # Zero out all losses except policy so any value-param gradient must come from policy loss
+    config = make_config(use_reanalyze=False)
+    config = dataclasses.replace(
+        config,
+        value_loss_coeff=0.0,
+        reward_loss_coeff=0.0,
+        consistency_coeff=0.0,
+    )
+    net = MAMuZeroNet(config=config)
+    params = net.init(jax.random.PRNGKey(0), jnp.ones((1, N, OBS_DIM), dtype=jnp.float32))
+    worker = ReanalyzeWorker(config=config, model=net)
+    ctx = make_buffer_ctx(config)
+    batch = worker.make_batch(ctx, params)
+
+    update_fn = make_update_fn(net, config)
+    _, grads, _, _ = update_fn(params, batch)
+
+    # With stop_gradient, policy loss must not produce gradients in value_mlp output kernel
+    value_out_kernel = grads['params']['prediction_net']['value_mlp']['output']['kernel']
+    assert np.allclose(value_out_kernel, 0.0, atol=1e-6), (
+        f"Policy gradient leaked into value_mlp output kernel. max={np.abs(value_out_kernel).max():.2e}"
+    )
