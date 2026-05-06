@@ -88,6 +88,23 @@ def test_pad_to_k_exact_k():
     np.testing.assert_allclose(pol.sum(), 1.0, atol=1e-5)
 
 
+def test_pad_to_k_empty():
+    """K_actual=0: all-zero pol, all-False mask."""
+    K, N = 5, 3
+    pol, actions, qvals, mask = _pad_to_k(
+        np.array([], dtype=np.float32),
+        np.zeros((0, N), dtype=np.int32),
+        np.array([], dtype=np.float32),
+        K, N,
+    )
+    assert pol.shape == (K,)
+    assert actions.shape == (K, N)
+    assert qvals.shape == (K,)
+    assert mask.shape == (K,)
+    assert not mask.any()
+    assert pol.sum() == 0.0
+
+
 def test_batch_shapes_no_reanalyze():
     config = make_config(use_reanalyze=False)
     net = MAMuZeroNet(config=config)
