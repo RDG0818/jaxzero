@@ -322,6 +322,14 @@ def train(config: MAZeroConfig, env_fn):
     mcts.search(params, np.array(_obs_dummy), _legal_dummy, np.random.default_rng(0))
     print("Compilation done.")
 
+    if config.use_reanalyze:
+        _B_re = config.batch_size * (config.unroll_steps + 1)
+        _obs_re = np.ones((_B_re, config.num_agents, config.obs_size), dtype=np.float32)
+        _legal_re = np.ones((_B_re, config.num_agents, config.action_space_size), dtype=bool)
+        print(f"Compiling JAX reanalysis MCTS (batch={_B_re}, one-time)...")
+        mcts.search(params, _obs_re, _legal_re, np.random.default_rng(1))
+        print("Reanalysis compilation done.")
+
     beta_fn = lambda step: min(
         1.0,
         config.priority_beta_start + (1.0 - config.priority_beta_start) * step / config.training_steps,
