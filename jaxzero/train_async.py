@@ -53,6 +53,11 @@ def train_async(config: MAZeroConfig) -> dict:
     total_steps = 0
     recent_returns: deque = deque(maxlen=100)
 
+    # Profiling: count completions per actor type between log intervals
+    _completions = {"learner": 0, "data": 0, "reanalyze": 0}
+    _last_profile_step = 0
+    _profile_interval = max(config.log_interval, config.learner_steps_per_call * 10)
+
     print(f"Starting async training loop with {len(data_actors)} data actors and {len(reanalyze_actors)} reanalyze actors...")
     while total_steps < config.training_steps:
         all_pending = list(actor_tasks.keys()) + list(reanalyze_tasks.keys()) + [learner_task]
@@ -61,6 +66,7 @@ def train_async(config: MAZeroConfig) -> dict:
 
         if done_ref == learner_task:
             metrics = ray.get(learner_task)
+            _completions["learner"] += 1
             if metrics is not None:
                 total_steps = metrics["step"]
                 if total_steps % config.log_interval < config.learner_steps_per_call:
@@ -72,14 +78,33 @@ def train_async(config: MAZeroConfig) -> dict:
                         f" p={metrics['policy_loss']:.3f}"
                         f" | ep_return={mean_ret:.2f}"
                     )
+
+                # Print profiling breakdown from learner timing
+                if total_steps - _last_profile_step >= _profile_interval:
+                    _last_profile_step = total_steps
+                    dc = _completions["data"]
+                    lc = _completions["learner"]
+                    rc = _completions["reanalyze"]
+                    print(
+                        f"[profile] learner={lc} data={dc} reanalyze={rc} completions"
+                        f" | buf={metrics['t_buf']:.2f}s"
+                        f" reanalyze={metrics['t_reanalyze']:.2f}s"
+                        f" update={metrics['t_update']:.2f}s"
+                        f" gpu_frac={metrics['gpu_frac']:.1%}"
+                        f" (per {config.learner_steps_per_call} steps)"
+                    )
+                    _completions = {"learner": 0, "data": 0, "reanalyze": 0}
+
             if total_steps < config.training_steps:
                 learner_task = learner.run_training_loop.remote(config.learner_steps_per_call)
 
         elif done_ref in reanalyze_tasks:
+            _completions["reanalyze"] += 1
             finished_reanalyze = reanalyze_tasks.pop(done_ref)
             reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:
+            _completions["data"] += 1
             ep_return = ray.get(done_ref)
             recent_returns.append(ep_return)
             finished_actor = actor_tasks.pop(done_ref)
