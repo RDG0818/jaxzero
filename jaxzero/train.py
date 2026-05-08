@@ -1,3 +1,5 @@
+import time
+import collections
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -340,10 +342,20 @@ def train(config: MAZeroConfig, env_fn):
     recent_returns = []
     target_params = params  # Initialize target network
 
+    # Profiling accumulators (rolling window of last profile_window rounds)
+    profile_window = 20
+    t_collect  = collections.deque(maxlen=profile_window)
+    t_reanalyze = collections.deque(maxlen=profile_window)
+    t_update   = collections.deque(maxlen=profile_window)
+
     while step < config.training_steps:
         rng, ep_rng = jr.split(rng)
-        # Collection always uses latest params for best data
+
+        _t0 = time.perf_counter()
         games = collect_episodes_parallel(envs, mcts, params, config, ep_rng)
+        jax.effects_barrier()  # wait for any async JAX ops before timing boundary
+        t_collect.append(time.perf_counter() - _t0)
+
         for game in games:
             replay_buffer.add(game)
             recent_returns.append(sum(game.rewards))
@@ -360,8 +372,11 @@ def train(config: MAZeroConfig, env_fn):
         # Avoids paying MCTS cost per gradient step; consistent with target_params design.
         beta = beta_fn(step)
         ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
+        _t0 = time.perf_counter()
         batch = reanalyze_worker.make_batch(ctx, target_params)
+        t_reanalyze.append(time.perf_counter() - _t0)
 
+        _t0 = time.perf_counter()
         for _ in range(config.updates_per_collection):
             # Periodically update target network
             if step % config.target_model_interval == 0:
@@ -388,5 +403,21 @@ def train(config: MAZeroConfig, env_fn):
             step += 1
             if step >= config.training_steps:
                 break
+
+        jax.effects_barrier()
+        t_update.append(time.perf_counter() - _t0)
+
+        # Print timing breakdown every profile_window rounds
+        if len(t_collect) == profile_window and len(t_collect) % profile_window == 0:
+            tc = np.mean(t_collect)
+            tr = np.mean(t_reanalyze)
+            tu = np.mean(t_update)
+            total = tc + tr + tu
+            ups = config.updates_per_collection / tu if tu > 0 else 0
+            print(
+                f"[profile] collect={tc:.2f}s  reanalyze={tr:.2f}s"
+                f"  updates={tu:.2f}s ({ups:.1f} up/s)"
+                f"  | gpu_frac={tu/total:.1%}"
+            )
 
     return params
