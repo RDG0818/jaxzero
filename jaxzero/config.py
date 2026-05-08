@@ -66,7 +66,7 @@ class MAZeroConfig:
 
     # Collection
     num_envs_parallel: int = 8
-    updates_per_collection: int = 2
+    updates_per_collection: int = 16
 
     # Async / Ray
     num_actors: int = 3

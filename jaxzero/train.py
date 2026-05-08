@@ -356,15 +356,16 @@ def train(config: MAZeroConfig, env_fn):
                 print(f"[filling buffer] round {collection_round}, size={replay_buffer.size}")
             continue
 
+        # Reanalyze once per collection round, then reuse for all gradient steps.
+        # Avoids paying MCTS cost per gradient step; consistent with target_params design.
+        beta = beta_fn(step)
+        ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
+        batch = reanalyze_worker.make_batch(ctx, target_params)
+
         for _ in range(config.updates_per_collection):
             # Periodically update target network
             if step % config.target_model_interval == 0:
                 target_params = params
-
-            beta = beta_fn(step)
-            ctx = replay_buffer.prepare_batch_context(config.batch_size, beta)
-            # Targets are computed using target_params to stabilize bootstrap
-            batch = reanalyze_worker.make_batch(ctx, target_params)
 
             loss, grads, aux, priorities = update_fn(params, batch)
             updates, opt_state = optimizer.update(grads, opt_state)
