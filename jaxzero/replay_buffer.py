@@ -46,6 +46,50 @@ class PrioritizedReplayBuffer:
 
         return games, positions, game_indices, weights
 
+    def prepare_batch(self, batch_size: int, beta: float) -> dict:
+        """Sample and assemble batch as numpy tensors. Avoids serializing game objects over Ray IPC."""
+        games, positions, game_indices, weights = self.prepare_batch_context(batch_size, beta)
+        U = self.config.unroll_steps
+
+        obs_list, actions_list, rewards_list = [], [], []
+        values_list, policies_list, qvals_list = [], [], []
+        masks_list, sa_list = [], []
+
+        for b in range(batch_size):
+            game = games[b]
+            pos = int(positions[b])
+            T = len(game)
+
+            obs_b, act_b, rew_b, val_b, pol_b, qv_b, mask_b = game.make_target(
+                pos=pos,
+                unroll_steps=U,
+                td_steps=self.config.td_steps,
+                discount=self.config.discount,
+            )
+            sa_b = np.stack([game.sampled_actions[min(pos + k, T - 1)] for k in range(U + 1)])
+
+            obs_list.append(obs_b)
+            actions_list.append(act_b)
+            rewards_list.append(rew_b)
+            values_list.append(val_b)
+            policies_list.append(pol_b)
+            qvals_list.append(qv_b)
+            masks_list.append(mask_b)
+            sa_list.append(sa_b)
+
+        return {
+            "obs": np.stack(obs_list),
+            "actions": np.stack(actions_list),
+            "target_rewards": np.stack(rewards_list),
+            "target_values": np.stack(values_list),
+            "target_policies": np.stack(policies_list),
+            "target_qvalues": np.stack(qvals_list),
+            "target_masks": np.stack(masks_list),
+            "sampled_actions": np.stack(sa_list),
+            "weights": weights,
+            "indices": game_indices,
+        }
+
     def update_priorities(self, indices: np.ndarray, new_priorities: np.ndarray):
         for idx, p in zip(indices, new_priorities):
             if 0 <= idx < len(self._priorities):

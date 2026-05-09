@@ -99,8 +99,12 @@ def train_async(config: MAZeroConfig) -> dict:
                 learner_task = learner.run_training_loop.remote(config.learner_steps_per_call)
 
         elif done_ref in reanalyze_tasks:
-            _completions["reanalyze"] += 1
             finished_reanalyze = reanalyze_tasks.pop(done_ref)
+            try:
+                ray.get(done_ref)
+                _completions["reanalyze"] += 1
+            except Exception as e:
+                print(f"[reanalyze error] {e}")
             reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
         else:

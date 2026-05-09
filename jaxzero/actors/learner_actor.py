@@ -21,7 +21,8 @@ class LearnerActor:
         import optax
         from jaxzero.model.networks import MAMuZeroNet
         from jaxzero.train import make_update_fn
-        from jaxzero.reanalyze import ReanalyzeWorker
+        from jaxzero.reanalyze import ReanalyzeWorker, BatchData
+        self._BatchData = BatchData
 
         self.config = config
         self.replay_buffer = replay_buffer_actor
@@ -66,14 +67,20 @@ class LearnerActor:
             )
 
             _t0 = time.perf_counter()
-            ctx = ray.get(self.replay_buffer.prepare_batch_context.remote(cfg.batch_size, beta))
-            t_buf += time.perf_counter() - _t0
-            if ctx is None:
-                break
-
-            _t0 = time.perf_counter()
-            batch = self.reanalyze_worker.make_batch(ctx, self.target_params)
-            t_reanalyze += time.perf_counter() - _t0
+            if cfg.num_reanalyze_actors > 0:
+                raw = ray.get(self.replay_buffer.prepare_batch.remote(cfg.batch_size, beta))
+                t_buf += time.perf_counter() - _t0
+                if raw is None:
+                    break
+                batch = self._BatchData(**raw)
+            else:
+                ctx = ray.get(self.replay_buffer.prepare_batch_context.remote(cfg.batch_size, beta))
+                t_buf += time.perf_counter() - _t0
+                if ctx is None:
+                    break
+                _t0 = time.perf_counter()
+                batch = self.reanalyze_worker.make_batch(ctx, self.target_params)
+                t_reanalyze += time.perf_counter() - _t0
 
             _t0 = time.perf_counter()
             loss, grads, aux, priorities = self.update_fn(self.params, batch)

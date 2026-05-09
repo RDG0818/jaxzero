@@ -1,3 +1,4 @@
+import numpy as np
 import ray
 from jaxzero.config import MAZeroConfig
 
@@ -26,6 +27,12 @@ class ReplayBufferActor:
         if not self._buf.can_sample(batch_size):
             return None
         return self._buf.prepare_batch_context(batch_size, beta)
+
+    def prepare_batch(self, batch_size: int, beta: float):
+        """Returns pre-assembled numpy tensor dict or None if buffer not ready."""
+        if not self._buf.can_sample(batch_size):
+            return None
+        return self._buf.prepare_batch(batch_size, beta)
 
     def update_priorities(self, indices, new_priorities) -> None:
         self._buf.update_priorities(indices, new_priorities)
