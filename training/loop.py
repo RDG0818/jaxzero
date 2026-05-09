@@ -86,11 +86,6 @@ def run_training_loop(
         done_ref = done_refs[0]
 
         if done_ref == learner_task:
-            now = time.monotonic()
-            _loop_learner_gaps.append(now - _loop_last_learner_t)
-            _loop_last_learner_t = now
-            _loop_learner_completions += 1
-
             metrics = ray.get(learner_task)
             if metrics is not None:
                 train_losses.append(metrics["total_loss"])
@@ -101,7 +96,6 @@ def run_training_loop(
 
         elif done_ref in reanalyze_tasks:
             ray.get(done_ref)
-            _loop_reanalyze_completions += 1
             finished_reanalyze = reanalyze_tasks.pop(done_ref)
             reanalyze_tasks[finished_reanalyze.run_reanalyze.remote()] = finished_reanalyze
 
