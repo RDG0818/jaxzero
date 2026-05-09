@@ -155,4 +155,4 @@ class ReanalyzeActor:
                     np.array(plan_output.root_child_visits),    # (B, K)
                 )
 
-        self.profiler.step()
+

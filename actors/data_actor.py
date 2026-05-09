@@ -260,8 +260,6 @@ class DataActor:
                     and self.episodes_since_update >= self.config.train.param_update_interval):
                 self._param_future = self.learner.get_params.remote()
 
-        self.profiler.step()
-
         win_rate = float(np.mean(episode_wins))
         mean_return = float(np.mean([ep.episode_return for ep in episodes]))
         return mean_return, win_rate
