@@ -58,6 +58,12 @@ def main():
         default=None,
         help="Number of parallel ReanalyzeActors (default: 0)",
     )
+    parser.add_argument(
+        "--log_interval",
+        type=int,
+        default=None,
+        help="Log every N training steps (default: 100)",
+    )
     args = parser.parse_args()
 
     # For async training, init Ray before JAX is imported (via env probe below).
@@ -88,6 +94,8 @@ def main():
         overrides["num_actors"] = args.num_actors
     if args.num_reanalyze is not None:
         overrides["num_reanalyze_actors"] = args.num_reanalyze
+    if args.log_interval is not None:
+        overrides["log_interval"] = args.log_interval
     config = MAZeroConfig(
         env_name=args.env,
         num_agents=probe.num_agents,

@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import ray
 from jaxzero.config import MAZeroConfig
@@ -33,6 +34,7 @@ class ReanalyzeActor:
         self.params = ray.get(learner_actor.get_params.remote())
         self._param_future = None
         self.steps_since_sync = 0
+        self._compiled = False
 
     def run_reanalyze(self) -> int:
         """Sample batch from buffer, re-run MCTS, and push back results."""
@@ -53,11 +55,16 @@ class ReanalyzeActor:
             self._param_future = self.learner.get_params.remote()
 
         # 3. Perform MCTS on each sampled position
-        # We can batch these into one mcts.search call!
         obs_batch = np.stack([c[2] for c in ctx])
         legal_batch = np.stack([c[3] for c in ctx])
-        
+
+        if not self._compiled:
+            print(f"[ReanalyzeActor {self.actor_id}] compiling MCTS (batch={len(ctx)})...", flush=True)
+        _t0 = time.perf_counter()
         results = self.mcts.search(self.params, obs_batch, legal_batch, self.np_rng)
+        if not self._compiled:
+            print(f"[ReanalyzeActor {self.actor_id}] compilation done ({time.perf_counter() - _t0:.1f}s)", flush=True)
+            self._compiled = True
         
         # 4. Format and push back
         update_data = []

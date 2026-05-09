@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import ray
 from jaxzero.config import MAZeroConfig
@@ -59,7 +60,10 @@ class DataActor:
         _legal = np.ones(
             (config.num_envs_parallel, config.num_agents, config.action_space_size), dtype=bool
         )
+        print(f"[DataActor {actor_id}] compiling MCTS (batch={config.num_envs_parallel})...", flush=True)
+        _t = time.perf_counter()
         self.mcts.search(self.params, _obs, _legal, np.random.default_rng(0))
+        print(f"[DataActor {actor_id}] compilation done ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     def run_episode(self) -> float:
         """Collect one batch of parallel episodes. Returns mean episode return."""

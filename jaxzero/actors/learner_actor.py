@@ -45,6 +45,7 @@ class LearnerActor:
         self.update_fn = make_update_fn(net, config)
         self.reanalyze_worker = ReanalyzeWorker(config=config, model=net)
         self.target_params = self.params
+        self._compiled = False
 
     def get_params(self):
         """Return params as numpy — safe to send across Ray process boundaries."""
@@ -84,11 +85,16 @@ class LearnerActor:
                 batch = self.reanalyze_worker.make_batch(ctx, self.target_params)
                 t_reanalyze += time.perf_counter() - _t0
 
+            if not self._compiled:
+                print("[LearnerActor] compiling update_fn...", flush=True)
             _t0 = time.perf_counter()
             loss, grads, aux, priorities = self.update_fn(self.params, batch)
             grad_norm = self._optax.global_norm(grads)
             self._jax.effects_barrier()
             t_update += time.perf_counter() - _t0
+            if not self._compiled:
+                print(f"[LearnerActor] compilation done ({t_update:.1f}s)", flush=True)
+                self._compiled = True
             grad_norms.append(float(grad_norm))
 
             updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
