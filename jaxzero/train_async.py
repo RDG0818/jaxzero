@@ -31,10 +31,12 @@ def train_async(config: MAZeroConfig) -> dict:
     ]
 
     # -- Warmup: fill buffer before training starts --
+    # Only run data actors during warmup — reanalyze actors trigger first-time JAX JIT
+    # compilation on their first call, which is CPU-intensive. Starting them after warmup
+    # lets DataActors compile (and finish warmup) without resource contention.
     target = config.min_replay_size
     print(f"Warming up: filling buffer to {target} games...")
     actor_tasks = {actor.run_episode.remote(): actor for actor in data_actors}
-    reanalyze_tasks = {actor.run_reanalyze.remote(): actor for actor in reanalyze_actors}
 
     while True:
         buf_size = ray.get(replay_buffer.get_size.remote())
@@ -47,6 +49,9 @@ def train_async(config: MAZeroConfig) -> dict:
         ray.get(done_ref)
         actor_tasks[finished_actor.run_episode.remote()] = finished_actor
     print(f"\nWarmup complete.")
+
+    # Start reanalyze actors after warmup — they compile MCTS while training runs
+    reanalyze_tasks = {actor.run_reanalyze.remote(): actor for actor in reanalyze_actors}
 
     # -- Async training loop --
     learner_task = learner.run_training_loop.remote(config.learner_steps_per_call)
