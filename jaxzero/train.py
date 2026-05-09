@@ -161,11 +161,19 @@ def make_update_fn(model, config: MAZeroConfig):
         c_term = config.consistency_coeff * consistency_loss
         total = r_term + v_term + p_term + c_term
         scalar = (weights * total).mean() / U
+
+        # Policy entropy: mean over batch, agents, unroll steps (in nats)
+        def _step_entropy(logits):  # (B, N, A) -> scalar
+            return -(jax.nn.softmax(logits, axis=-1) * jax.nn.log_softmax(logits, axis=-1)).sum(axis=-1).mean()
+
+        policy_entropy = _step_entropy(out0.policy_logits)
+
         aux = {
             "reward_loss": (weights * r_term).mean() / U,
             "value_loss": (weights * v_term).mean() / U,
             "policy_loss": (weights * p_term).mean() / U,
             "consistency_loss": (weights * c_term).mean() / U,
+            "policy_entropy": policy_entropy,
         }
         return scalar, (aux, total)
 
@@ -391,12 +399,15 @@ def train(config: MAZeroConfig, env_fn):
 
             if step % config.log_interval == 0:
                 mean_ret = np.mean(recent_returns) if recent_returns else float("nan")
+                grad_norm = optax.global_norm(grads)
                 print(
                     f"Step {step}: loss={float(loss):.4f}"
                     f" | r={float(aux['reward_loss']):.3f}"
                     f" v={float(aux['value_loss']):.3f}"
                     f" p={float(aux['policy_loss']):.3f}"
                     f" c={float(aux['consistency_loss']):.3f}"
+                    f" | gnorm={float(grad_norm):.2f}"
+                    f" ent={float(aux['policy_entropy']):.3f}"
                     f" | ep_return={mean_ret:.2f}"
                 )
 

@@ -53,8 +53,10 @@ class LearnerActor:
     def run_training_loop(self, num_steps: int):
         """Run up to num_steps gradient updates. Returns metrics dict or None if buffer empty."""
         cfg = self.config
-        losses, r_losses, v_losses, p_losses = [], [], [], []
+        losses, r_losses, v_losses, p_losses, c_losses = [], [], [], [], []
+        grad_norms, entropies = [], []
         t_buf, t_reanalyze, t_update = 0.0, 0.0, 0.0
+        t_wall_start = time.perf_counter()
 
         for _ in range(num_steps):
             if self.step % cfg.target_model_interval == 0:
@@ -84,8 +86,10 @@ class LearnerActor:
 
             _t0 = time.perf_counter()
             loss, grads, aux, priorities = self.update_fn(self.params, batch)
+            grad_norm = self._optax.global_norm(grads)
             self._jax.effects_barrier()
             t_update += time.perf_counter() - _t0
+            grad_norms.append(float(grad_norm))
 
             updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
             self.params = self._optax.apply_updates(self.params, updates)
@@ -95,21 +99,28 @@ class LearnerActor:
             r_losses.append(float(aux["reward_loss"]))
             v_losses.append(float(aux["value_loss"]))
             p_losses.append(float(aux["policy_loss"]))
+            c_losses.append(float(aux["consistency_loss"]))
+            entropies.append(float(aux["policy_entropy"]))
             self.step += 1
 
         if not losses:
             return None
 
         total_t = t_buf + t_reanalyze + t_update
+        wall_t = time.perf_counter() - t_wall_start
         return {
             "step": self.step,
             "total_loss": float(np.mean(losses)),
             "reward_loss": float(np.mean(r_losses)),
             "value_loss": float(np.mean(v_losses)),
             "policy_loss": float(np.mean(p_losses)),
+            "consistency_loss": float(np.mean(c_losses)),
+            "grad_norm": float(np.mean(grad_norms)),
+            "policy_entropy": float(np.mean(entropies)),
             # timing (seconds over this call)
             "t_buf": t_buf,
             "t_reanalyze": t_reanalyze,
             "t_update": t_update,
             "gpu_frac": t_update / total_t if total_t > 0 else 0.0,
+            "steps_per_sec": len(losses) / wall_t if wall_t > 0 else 0.0,
         }

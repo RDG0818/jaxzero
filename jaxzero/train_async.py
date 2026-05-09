@@ -76,6 +76,9 @@ def train_async(config: MAZeroConfig) -> dict:
                         f" | r={metrics['reward_loss']:.3f}"
                         f" v={metrics['value_loss']:.3f}"
                         f" p={metrics['policy_loss']:.3f}"
+                        f" c={metrics['consistency_loss']:.3f}"
+                        f" | gnorm={metrics['grad_norm']:.2f}"
+                        f" ent={metrics['policy_entropy']:.3f}"
                         f" | ep_return={mean_ret:.2f}"
                     )
 
@@ -91,6 +94,7 @@ def train_async(config: MAZeroConfig) -> dict:
                         f" reanalyze={metrics['t_reanalyze']:.2f}s"
                         f" update={metrics['t_update']:.2f}s"
                         f" gpu_frac={metrics['gpu_frac']:.1%}"
+                        f" {metrics['steps_per_sec']:.2f} steps/s"
                         f" (per {config.learner_steps_per_call} steps)"
                     )
                     _completions = {"learner": 0, "data": 0, "reanalyze": 0}
