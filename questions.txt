@@ -1,0 +1,96 @@
+INTERVIEW QUESTIONS — JAX MAZero Implementation
+================================================
+
+MCTS & PLANNING
+---------------
+1. What is MuZero and how does it differ from AlphaZero?
+
+2. What is Gumbel MuZero and why use it over vanilla MCTS? What problem does Gumbel sampling solve at the root?
+
+3. Explain the OS(λ) backup. How does it differ from standard mean backup, and why is it better for multi-agent settings?
+
+4. Why is the joint action space exponential in the number of agents, and how does MAZero address this?
+
+5. What is the role of Dirichlet noise in MCTS, and where is it applied?
+
+6. What is reanalysis and why does it help? What are the tradeoffs (compute cost vs. staleness reduction)?
+
+7. In the OS(λ) planner, what does rho control and what does lambda control?
+
+
+WORLD MODEL & ARCHITECTURE
+---------------------------
+8. Walk me through the four sub-networks of the world model and what each one does.
+
+9. Why represent reward and value as categorical distributions over a discrete support instead of scalars?
+
+10. What is the tz-transform (MuZero scalar transform)? Why apply it before categorizing?
+
+11. What is the BYOL-style consistency loss (SPR)? What is the online branch vs. target branch, and why stop the gradient on the target?
+
+12. What is an EMA target network? Why use EMA instead of hard copying parameters periodically?
+
+13. Why is scale_grad_half applied to hidden states between unroll steps? What goes wrong without it?
+
+14. What is AWPO (Advantage-Weighted Policy Optimization)? When and why is it helpful?
+
+
+JAX-SPECIFIC
+------------
+15. What does jax.vmap do and where is it used in this codebase?
+
+16. What does jax.lax.fori_loop do and why use it instead of a Python for loop inside JIT?
+
+17. Why must all JAX imports be inside Ray actor __init__ / methods and never at module top-level?
+
+18. What does jax.block_until_ready() do and when is it necessary for accurate profiling?
+
+19. What is JAX's functional programming model and how does it affect how you write stateful training (optimizer state, EMA params)?
+
+20. What is XLA and how does it relate to JAX's performance?
+
+
+RAY & INFRASTRUCTURE
+--------------------
+21. Explain the async actor-learner pattern used here. What runs on GPU, what runs on CPU, and how do they communicate?
+
+22. Why does the learner run N steps internally per Ray call instead of one step per call?
+
+23. How does async parameter sync work in the DataActor? Why does it overlap with MCTS compute?
+
+24. What is prioritized experience replay (PER)? How are priorities set and how do they affect sampling?
+
+25. Why does the replay buffer convert everything to NumPy before storage?
+
+26. What is CUDA pinned (page-locked) memory and why does the C++ replay buffer use it for output buffers?
+
+27. What is stratified sampling in the context of PER, and why is it better than naive importance sampling?
+
+28. What is Ray at a high level and what problem does it solve compared to plain Python multiprocessing?
+
+29. What is the difference between a Ray remote function (@ray.remote on a function) and a Ray actor (@ray.remote on a class)?
+
+30. What does ray.get() do and what does ray.wait() do? When would you use one over the other?
+
+31. What is the Ray object store and how does it differ from passing data through function arguments?
+
+32. How do the num_cpus and num_gpus arguments to @ray.remote work? What happens if you request more resources than are available?
+
+33. How does Ray serialize objects passed between actors, and what types cause problems?
+
+34. What is ray.put() and when would you use it explicitly instead of letting Ray handle it automatically?
+
+35. If a Ray actor crashes mid-training, what happens to in-flight futures that referenced it?
+
+
+TRAINING STABILITY & ENGINEERING
+---------------------------------
+36. What can go wrong if you use a too-large learning rate with categorical value targets?
+
+37. What is observation normalization and why use EMA instead of a fixed running mean?
+
+38. The learner packs all GPU->CPU transfers (metrics + priorities) into a single jnp.concatenate before calling np.array(). Why does this matter for performance?
+
+39. What is the n-step return and how does it trade off bias vs. variance compared to TD(0) or Monte Carlo?
+
+40. Why might training diverge if the replay buffer is too small relative to the batch size?

@@ -1,0 +1,264 @@
+INTERVIEW ANSWERS — JAX MAZero Implementation
+===============================================
+
+MCTS & PLANNING
+---------------
+
+1. What is MuZero and how does it differ from AlphaZero?
+
+AlphaZero requires access to a perfect environment simulator during planning — it calls the real game engine to expand MCTS nodes. MuZero learns a world model (representation + dynamics + prediction networks) and plans entirely inside that learned model, never touching the real environment during search. This makes it applicable to domains where a simulator isn't available or is expensive. The tradeoff is that the learned model is imperfect, so planning errors compound over long unrolls.
+
+---
+
+2. What is Gumbel MuZero and why use it over vanilla MCTS? What problem does Gumbel sampling solve at the root?
+
+Standard MCTS selects actions at the root by visit count, which requires many simulations to reliably identify the best action — the visit distribution converges slowly. Gumbel MuZero instead samples a fixed set of K actions at the root using Gumbel noise (top-k from policy logits + Gumbel noise), then uses a sequential halving procedure to allocate the simulation budget among those K candidates. This gives much stronger action selection with fewer simulations, which matters when simulations are expensive (each one calls the dynamics network). It also provides policy improvement guarantees under the assumption that value estimates are accurate.
+
+---
+
+3. Explain the OS(λ) backup. How does it differ from standard mean backup, and why is it better for multi-agent settings?
+
+Standard MCTS uses mean backup: a node's Q-value is the average return across all simulations passing through it. OS(λ) (Order Statistics with λ discounting) instead computes a weighted quantile estimate. For each node, it tracks the per-simulation returns and depths, filters to the top (1-rho) quantile (discarding the worst rho fraction), then weights remaining simulations by λ^depth — deeper simulations get less weight since they rely on more model unroll steps and accumulate more error. This is more robust than mean backup in multi-agent settings because other agents' stochastic behavior creates high variance in simulation returns; the quantile filter discards unlucky outliers without throwing away all information.
+
+---
+
+4. Why is the joint action space exponential in the number of agents, and how does MAZero address this?
+
+With N agents each having A actions, the joint action space is A^N. For 3 agents with 9 actions each, that's 729 joint actions — too many to enumerate at each MCTS node. MAZero addresses this by sampling K joint actions per node (K=5 or 10) rather than considering all A^N. At each node expansion, K joint actions are drawn, the dynamics network is called K times, and only those K children are added to the tree. This keeps per-node cost O(K) regardless of N or A. The tradeoff is that rarely sampled joint actions may be missed, but with a good policy prior guiding the sampling, the important ones get covered.
+
+---
+
+5. What is the role of Dirichlet noise in MCTS, and where is it applied?
+
+Dirichlet noise is added to the prior policy probabilities at the root node only. It ensures all actions have some probability of being explored regardless of what the policy network prefers, preventing the search from being overconfident in the current policy early in training. It's a form of exploration that only affects the root — internal nodes use the raw policy prior. The mixture weight (e.g., 0.25 Dirichlet, 0.75 policy) controls how much noise is injected.
+
+---
+
+6. What is reanalysis and why does it help? What are the tradeoffs?
+
+Reanalysis takes previously collected observations from the replay buffer and re-runs MCTS with the current (more trained) model parameters to generate fresher policy and value targets. Without reanalysis, a replay item stored early in training has targets computed by a much weaker model — those stale targets slow learning. Reanalysis continuously refreshes targets so the learner is always training on the best available signal. The tradeoff is compute: reanalysis requires running full MCTS on CPU actors, which is expensive. MAZero used 20-30 reanalyze actors on an A100 because it was the throughput bottleneck. This implementation uses 1, which is sufficient given the much smaller batch size relative to buffer size.
+
+---
+
+7. In the OS(λ) planner, what does rho control and what does lambda control?
+
+rho controls the quantile cutoff — only the top (1-rho) fraction of simulations by return are kept when computing Q-value estimates. rho=0.25 discards the bottom 25% of simulation returns, filtering out unlucky trajectories. lambda controls depth discounting — simulation returns are weighted by λ^depth, so simulations that went deeper into the tree (and therefore relied on more model unroll steps) receive less weight. lambda=0.8 means a simulation at depth 5 gets weight 0.8^5 ≈ 0.33 relative to depth-0. Both together make the Q-estimate robust to model errors and environment stochasticity.
+
+---
+
+WORLD MODEL & ARCHITECTURE
+---------------------------
+
+8. Walk me through the four sub-networks of the world model and what each one does.
+
+RepresentationNetwork: takes raw per-agent observations (B, N, obs_dim) and encodes them into latent states (B, N, D). This is the only network that ever sees real observations — everything else operates in latent space.
+
+DynamicsNetwork: takes a latent state and a joint action, returns the next imagined latent state and reward logits. This is used inside MCTS simulations to unroll the world model forward without touching the real environment.
+
+PredictionNetwork: takes a latent state and returns per-agent policy logits (B, N, A) and centralized value logits. Called at every node in the MCTS tree to get priors and value estimates.
+
+ProjectionNetwork: BYOL-style consistency head. The online branch applies a projection MLP + prediction MLP to latent states from the dynamics unroll. The target branch applies only the projection MLP using EMA parameters. Cosine similarity between the two is the consistency loss — it encourages the dynamics network to produce latents that are predictive of future states.
+
+---
+
+9. Why represent reward and value as categorical distributions over a discrete support instead of scalars?
+
+Scalar regression with MSE loss assumes a unimodal, symmetric error distribution, which is often wrong for value functions — value distributions can be multimodal or heavy-tailed. Categorical cross-entropy over a discrete support treats the value prediction as a classification problem, which is better conditioned numerically and more stable with gradient descent. It also naturally handles the case where the true value is between two support atoms (via two-hot encoding). Empirically it converges faster and is more robust to outlier returns.
+
+---
+
+10. What is the tz-transform (MuZero scalar transform)? Why apply it before categorizing?
+
+The transform is h(x) = sign(x) * (sqrt(|x| + 1) - 1) + epsilon * x. It compresses large magnitude values — a return of 10000 becomes roughly 100 after transformation. Without this, value targets can span several orders of magnitude, and a fixed discrete support (e.g., [-5, 5] with 51 atoms for SMAX) would need to be enormous to cover the full range. The transform maps values into a range where a compact support works well. The inverse (muzero_scale_inv) is applied when converting support back to scalar for MCTS backup computations.
+
+---
+
+11. What is the BYOL-style consistency loss (SPR)? What is the online branch vs. target branch, and why stop the gradient on the target?
+
+SPR (Self-Predictive Representations) adds a loss that encourages the model's imagined future latent states to match the actual future latent states. The online branch takes h_t (root latent) and applies the projection + prediction MLPs. The target branch takes h_{t+k} (latent after k dynamics steps) and applies only the projection MLP, but using EMA (slow-moving) parameters. Cosine similarity between the two is maximized. The gradient is stopped on the target to prevent the trivial collapse solution where both branches converge to a constant — if gradients flowed through the target, the network could minimize the loss by making everything the same vector. The EMA target provides a stable, slowly-moving learning signal.
+
+---
+
+12. What is an EMA target network? Why use EMA instead of hard copying parameters periodically?
+
+EMA (Exponential Moving Average) maintains a shadow copy of parameters: ema_params = decay * ema_params + (1 - decay) * online_params, updated every training step. Hard copying (every N steps) creates discontinuous jumps in the target network, which can destabilize training — the loss suddenly shifts because the target changed. EMA produces smooth, continuous updates, which keeps the learning target stable. With decay=0.999, the EMA lags the online params by roughly 1000 steps, providing a stable but eventually up-to-date target.
+
+---
+
+13. Why is scale_grad_half applied to hidden states between unroll steps? What goes wrong without it?
+
+During the unroll, gradients flow back through the dynamics network at each step. Without scaling, the gradient magnitude grows with the unroll length — the representation network at step 0 receives gradients summed over all K unroll steps, making it much larger than the gradient on the dynamics network at step K. This imbalance causes the representation network to overfit to the dynamics loss at the expense of the prediction loss at the root, and can destabilize training. Halving the gradient on hidden states between steps balances the gradient magnitudes across the unroll, keeping both representation and dynamics learning at similar scales.
+
+---
+
+14. What is AWPO (Advantage-Weighted Policy Optimization)? When and why is it helpful?
+
+AWPO weights the policy gradient loss at the root by exp(clip((V_mcts - V_net) / alpha, -5, 5)), normalized by the batch mean. V_mcts is the MCTS value estimate (more accurate), V_net is the network's value estimate. When MCTS finds a much better value than the network predicted, the weight is large — this sample is informative and the policy update should be aggressive. When MCTS agrees with the network, the weight is near 1. When MCTS finds a worse value, the weight is small. This is helpful in sparse reward environments like SMAX where most episodes have near-zero reward early in training — upweighting the rare high-advantage samples accelerates learning of the winning policy.
+
+---
+
+JAX-SPECIFIC
+------------
+
+15. What does jax.vmap do and where is it used in this codebase?
+
+vmap vectorizes a function over a batch dimension without writing explicit batch loops. It transforms a function that operates on a single example into one that operates on a batch, with the same code. In this codebase, the OS(λ) MCTS planner is vmapped over the batch dimension B — the core MCTS logic is written for a single environment, then vmap handles parallelism across B environments automatically. This is more efficient than a Python loop and compiles down to parallel XLA operations.
+
+---
+
+16. What does jax.lax.fori_loop do and why use it instead of a Python for loop inside JIT?
+
+jax.lax.fori_loop is a JAX-native loop primitive that compiles to a single XLA while_loop op. A Python for loop inside jit gets unrolled — the compiler sees N copies of the loop body, which causes O(N) compile time and binary size. For MCTS with 50-100 simulations, unrolling would make compilation extremely slow and the compiled function very large. fori_loop keeps the loop as a single op, so compile time is O(1) in the number of iterations. The tradeoff is that you cannot use Python control flow inside the loop body — all branching must use jax.lax.cond.
+
+---
+
+17. Why must all JAX imports be inside Ray actor __init__ / methods and never at module top-level?
+
+JAX eagerly initializes the GPU and allocates the full GPU memory when first imported. Ray spawns each actor as an isolated process. If JAX is imported at module top-level, it initializes the GPU before Ray has set up the process properly — in some cases before CUDA context is established — causing SEGFAULTs or driver crashes. Importing JAX inside __init__ ensures it only initializes after the Ray process is fully set up and after any environment variables (like CUDA_VISIBLE_DEVICES) are correctly set for that process.
+
+---
+
+18. What does jax.block_until_ready() do and when is it necessary for accurate profiling?
+
+JAX uses asynchronous dispatch — when you call a JAX operation, it queues the computation on the accelerator and returns immediately with a future. The Python thread continues without waiting for the GPU to finish. block_until_ready() forces the Python thread to wait until the queued computation actually completes. Without it, timing a JAX operation measures only the dispatch time (~microseconds), not the actual compute time. Any profiling or benchmarking that wraps JAX calls must use block_until_ready() to get accurate wall-clock measurements.
+
+---
+
+19. What is JAX's functional programming model and how does it affect how you write stateful training?
+
+JAX functions must be pure — no side effects, same output for same input. This means you cannot have mutable global state. All state (model parameters, optimizer state, EMA params, RNG keys) must be explicit function arguments and return values. In practice: the training step takes (params, opt_state, ema_params, batch, rng_key) and returns (new_params, new_opt_state, new_ema_params, metrics). The LearnerActor stores state as Python instance variables and passes them explicitly into each JIT-compiled function call, threading state through manually.
+
+---
+
+20. What is XLA and how does it relate to JAX's performance?
+
+XLA (Accelerated Linear Algebra) is a domain-specific compiler for linear algebra that JAX uses as its backend. When you call jax.jit, JAX traces your function to produce an XLA computation graph, then XLA compiles it to optimized machine code for GPU/CPU/TPU. XLA performs operator fusion (combining multiple ops into one kernel to avoid memory roundtrips), layout optimization, and dead code elimination. This is why JAX code can match or exceed hand-written CUDA for linear algebra-heavy workloads — XLA handles the low-level optimization automatically.
+
+---
+
+RAY & INFRASTRUCTURE
+--------------------
+
+21. Explain the async actor-learner pattern. What runs on GPU, what runs on CPU, and how do they communicate?
+
+LearnerActor runs on GPU: pulls batches from the replay buffer, runs the training step (forward + backward + optimizer update + EMA update), and returns metrics + updated priorities. DataActors run on CPU: run MCTS episodes using the latest model parameters, produce ReplayItems, and push them to the replay buffer. ReplayBufferActor runs on CPU: stores transitions, handles PER sampling and priority updates. Communication is via Ray remote calls — DataActors call learner.get_params.remote() to fetch parameters, then replay_buffer.add.remote() to push data. The learner calls replay_buffer.sample.remote() to get batches. Everything is asynchronous — no actor waits for another unless it explicitly calls ray.get().
+
+---
+
+22. Why does the learner run N steps internally per Ray call instead of one step per call?
+
+Each Ray remote call has ~100ms of scheduling overhead (serialization, IPC, dispatch). At 14ms per training step, one step per call means 100ms overhead per 14ms of work — ~87% overhead. Running N=log_interval//5 steps per call amortizes that 100ms over N steps. The learner loops internally on GPU, staying hot in GPU memory, with no Python/Ray involvement between steps. This is the primary reason train step time dropped from ~1560ms (MAZero) to ~14ms.
+
+---
+
+23. How does async parameter sync work in the DataActor? Why does it overlap with MCTS compute?
+
+At the end of each episode, the DataActor fires get_params.remote() — a non-blocking Ray call that starts fetching parameters from the LearnerActor. It does not wait. At the start of the next episode, it calls ray.get() on that future to resolve the new parameters. The ~300ms transfer (serializing ~10M params over IPC) happens during the MCTS computation of the current episode. Without this overlap, parameter sync would block between every episode, wasting ~300ms of actor idle time per episode.
+
+---
+
+24. What is prioritized experience replay (PER)? How are priorities set and how do they affect sampling?
+
+PER samples transitions with probability proportional to their priority rather than uniformly. Transitions with higher TD error (the model was more wrong about them) get higher priority and are sampled more often — the learner focuses on the most informative experiences. Priorities are set to the absolute TD error after each training step; the LearnerActor computes per-sample priorities and sends them back to the ReplayBufferActor. A sum tree data structure enables O(log n) priority-weighted sampling. The beta parameter controls importance sampling correction weights that compensate for the sampling bias.
+
+---
+
+25. Why does the replay buffer convert everything to NumPy before storage?
+
+JAX DeviceArrays live on GPU memory and are tied to the JAX process that created them. When a DataActor (a separate Ray process) produces MCTS output as JAX arrays and tries to send them to the ReplayBufferActor (another separate process), Ray must serialize them. JAX DeviceArrays cannot be safely serialized across process boundaries — attempting to do so causes either segfaults or silent data corruption. Converting to NumPy first moves the data to CPU host memory in a plain format that Ray can safely pickle and send across process boundaries.
+
+---
+
+26. What is CUDA pinned (page-locked) memory and why does the C++ replay buffer use it for output buffers?
+
+Normal CPU memory (pageable) can be swapped to disk by the OS. Before GPU DMA can transfer pageable memory to the GPU, CUDA must first copy it to a temporary pinned staging buffer — two copies total. Pinned (page-locked) memory is locked in RAM and can be DMA'd directly to the GPU in one copy. The C++ replay buffer allocates output sample buffers with cudaMallocHost, so when jax.device_put() is called on the sample batch, the data transfers directly from the pinned buffer to GPU memory in a single DMA transaction, saving 50-200µs per training step.
+
+---
+
+27. What is stratified sampling in PER, and why is it better than naive importance sampling?
+
+Naive PER draws B samples independently from the priority distribution. Due to randomness, some priority buckets may be over-represented and others under-represented in a given batch. Stratified sampling divides the total priority sum into B equal segments and draws exactly one sample per segment. This guarantees that the full priority range is covered in every batch — high-priority samples and moderate-priority samples both appear, with no segment left unsampled by chance. It reduces variance in the gradient estimate without changing the expected value of the estimator.
+
+---
+
+TRAINING STABILITY & ENGINEERING
+---------------------------------
+
+28. What can go wrong if you use a too-large learning rate with categorical value targets?
+
+Categorical cross-entropy loss is computed over a softmax distribution. With a large learning rate, the network can become overconfident — pushing logits to extreme values so one atom gets nearly all probability mass. Once overconfident in the wrong direction, the cross-entropy gradient becomes very small (saturated softmax), and the network is slow to recover. Additionally, large LR with categorical targets can cause instability in the support encoding/decoding cycle — the support_to_scalar conversion of an overconfident wrong distribution gives a badly wrong scalar backup value, poisoning MCTS.
+
+---
+
+29. What is observation normalization and why use EMA instead of a fixed running mean?
+
+Observation normalization scales each input feature to have zero mean and unit variance, preventing features with large magnitudes from dominating the representation network's input. EMA normalization (mean_t = alpha * mean_{t-1} + (1-alpha) * batch_mean) is preferred over a fixed running mean because the observation distribution can shift over training — as the policy improves, the agent visits different states. A fixed running mean from early training becomes stale and wrong for the current distribution. EMA adapts continuously, tracking the current distribution while smoothing out noise.
+
+---
+
+30. Why does the learner pack all GPU->CPU transfers into a single jnp.concatenate before np.array()?
+
+Each np.array() call on a JAX array triggers a synchronous device-to-host transfer over PCIe — a separate DMA transaction with its own overhead. If metrics (loss, reward_loss, policy_loss, value_loss, grad_norm) and priorities (batch_size floats) are transferred separately, each one incurs that overhead. Packing everything into one contiguous array with jnp.concatenate and calling np.array() once does a single DMA transaction regardless of how many values are inside. At batch_size=2048, priorities alone are 8KB; combined with metrics the single transfer is still small but the per-call overhead (~18ms observed) is paid only once.
+
+---
+
+31. What is the n-step return and how does it trade off bias vs. variance compared to TD(0) or Monte Carlo?
+
+The n-step return bootstraps from the value estimate n steps in the future: G_t^n = r_t + gamma*r_{t+1} + ... + gamma^{n-1}*r_{t+n-1} + gamma^n * V(s_{t+n}). TD(0) (n=1) has low variance (one step of actual reward, then bootstrap) but high bias if V is inaccurate. Monte Carlo (n=inf) has zero bias but high variance — the full return depends on all future stochastic actions and transitions. n=5 is a middle ground: enough real reward signal to reduce bias from a poor value estimate, but not so many steps that variance becomes problematic. For sparse reward environments like SMAX, larger n helps because the reward signal only appears at episode end — n=5 lets that signal propagate back further without waiting for full Monte Carlo.
+
+---
+
+32. Why might training diverge if the replay buffer is too small relative to batch size?
+
+A small buffer means the same transitions are sampled repeatedly in consecutive batches. The learner overfits to these recent transitions — gradients are correlated across batches instead of being independent estimates of the true gradient. This correlation causes the value function to chase moving targets (the latest policy changes the value of states already in the buffer), creating a feedback loop where value errors compound. Additionally, with a small buffer relative to batch size, PER's priority distribution becomes dominated by the most recent data, effectively destroying the prioritization benefit. The buffer needs to be large enough that any batch is a diverse, approximately i.i.d. sample from the data distribution.
+
+---
+
+RAY — DEEPER DIVE
+-----------------
+
+33. What is Ray at a high level and what problem does it solve compared to plain Python multiprocessing?
+
+Ray is a distributed execution framework that makes it easy to parallelize Python code across cores or machines. Plain Python multiprocessing has three main limitations: the GIL prevents true parallelism in a single process, inter-process communication requires explicit pipes/queues with manual serialization, and it does not scale beyond one machine. Ray solves all three: each Ray worker is a separate process (no GIL), objects are shared through a distributed object store (Plasma), and the same code scales from a laptop to a cluster with no changes. It also provides actors — stateful workers that persist across calls — which plain multiprocessing does not have natively. For RL, this means you can write a LearnerActor, DataActor, and ReplayBufferActor as normal Python classes and Ray handles scheduling, communication, and fault tolerance.
+
+---
+
+34. What is the difference between a Ray remote function and a Ray actor?
+
+A remote function (@ray.remote on a function) is stateless — each call is independent, Ray schedules it on any available worker, and there is no shared state between calls. It is like a distributed function call. A Ray actor (@ray.remote on a class) is stateful — Ray creates a dedicated process for the actor, and all method calls on that actor run in the same process sequentially, sharing instance variables. Actors are essential when you need persistent state across calls: the LearnerActor keeps model parameters, optimizer state, and a step counter in memory between training calls. A remote function would lose that state after every call.
+
+---
+
+35. What does ray.get() do and what does ray.wait() do? When would you use one over the other?
+
+ray.get(future) blocks the calling thread until the result is ready, then returns it. It is synchronous — you stop and wait. ray.wait(futures, num_returns=k) returns as soon as any k of the futures complete, giving you (done, not_done) lists. It does not block indefinitely. Use ray.get() when you need a specific result before proceeding (e.g., fetching params at episode start). Use ray.wait() in the main training loop where you want to process whichever actor finishes first — learner, data actor, or reanalyze actor — without idling waiting for a specific one. The async training loop uses ray.wait() on all pending futures so it reacts immediately to whichever completes next, keeping all actors busy.
+
+---
+
+36. What is the Ray object store and how does it differ from passing data through function arguments?
+
+The Ray object store (backed by Plasma, a shared-memory store) is a process-local (and optionally distributed) in-memory key-value store for large objects. When you call ray.put(obj), Ray serializes the object into the object store and returns an ObjectRef. Any other actor on the same machine can then access it via shared memory — no copy is made. When you pass a large object directly as an argument to a remote call, Ray also puts it in the object store automatically, but explicitly using ray.put() lets you reuse the same stored object across multiple calls without re-serializing it each time. For small objects (scalars, short dicts), the overhead of the object store is not worth it and Ray sends them inline.
+
+---
+
+37. How do num_cpus and num_gpus in @ray.remote work? What happens if you request more resources than are available?
+
+These are resource reservations that Ray uses for scheduling decisions — they tell Ray how much capacity this actor or task requires. Ray will not schedule a task on a node unless that node has enough remaining capacity. For example, @ray.remote(num_gpus=1) means Ray will only place this actor on a node with a free GPU slot, and it will deduct 1 GPU from that node's available pool while the actor lives. If you request more resources than any node has available, the task queues indefinitely — Ray does not error immediately, it just waits. In this codebase, DataActors are num_cpus=1 and the LearnerActor is num_gpus=1; the resource annotations prevent Ray from co-locating too many CPU-heavy actors on the same core.
+
+---
+
+38. How does Ray serialize objects passed between actors, and what types cause problems?
+
+Ray uses pickle (specifically cloudpickle for lambdas and closures) to serialize objects before putting them in the object store. Most Python objects serialize fine. Problems arise with: (1) JAX DeviceArrays — they reference GPU memory tied to a specific process; pickling them copies the data to CPU but the deserialized array in another process has no GPU context, causing silent errors or segfaults. (2) File handles, sockets, locks — these are OS resources that do not survive process boundaries. (3) Very large objects — serialization is CPU-bound and adds latency. The fix for JAX arrays is always converting to NumPy before any Ray boundary. For large objects like model parameters, the serialization cost (~300ms for ~10M params) is real and motivates async param sync to overlap it with compute.
+
+---
+
+39. What is ray.put() and when would you use it explicitly?
+
+ray.put(obj) manually places an object in the Ray object store and returns an ObjectRef. You would use it explicitly when: (1) you need to pass the same large object to multiple actors without re-serializing it each time — put it once, pass the ref to all; (2) you want to pre-stage data before a burst of remote calls to avoid serialization latency in the critical path; (3) you are debugging and want to inspect what Ray would store. In this codebase, model parameters are sent via get_params() return values rather than ray.put() explicitly, but if multiple actors needed the same params simultaneously, ray.put() on the params dict and distributing the ref would be more efficient.
+
+---
+
+40. If a Ray actor crashes mid-training, what happens to in-flight futures that referenced it?
+
+Any ray.get() or ray.wait() call on a future from a crashed actor raises a RayActorError. The future will never resolve normally. In the training loop, this surfaces as an exception in the main process — the loop crashes unless you wrap ray.get() in a try/except. Ray does not automatically restart actors by default; you must set max_restarts in @ray.remote(max_restarts=N) to enable automatic restart, and max_task_retries to retry in-flight calls. In this codebase there is no fault tolerance — a crashed DataActor or LearnerActor kills the run. For long production runs this would need to be addressed, either with max_restarts or by checkpointing frequently enough that a restart is cheap.

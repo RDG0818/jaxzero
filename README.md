@@ -20,6 +20,21 @@ Contact: rdg291@msstate.edu
 2. **Async actor-learner pipeline** — self-driving learner loop, async param sync, C++ replay buffer
 3. **Parallelism** — vectorized environments across multiple CPU actors
 
+## Results
+
+**MPE simple_spread** (3 agents, 25 steps/episode, RTX 3060 Ti):
+
+| Env Steps | MuZero | MAPPO |
+|---|---|---|
+| 0 | -80.8 | -74.9 |
+| 500k | -63.5 | -55.2 |
+| 1M | -58.6 | -56.4 |
+| 1.5M | -51.5 | -45.4 |
+| 2M | -52.5 | **-47.1** |
+| 2.5M | -48.4 | — |
+
+Return is sum of negative distances to landmarks per step; closer to 0 is better. MAPPO converges faster on this task — expected, since MPE simple_spread is dense-reward and relatively simple, so the world model overhead doesn't pay off vs. on-policy rollouts. MuZero's advantage appears on harder sparse-reward tasks (e.g. SMAC) where planning over a learned model provides better credit assignment.
+
 ## Implementation Highlights
 
 **Async actor-learner** (Ray): `LearnerActor` runs N training steps per Ray call to amortize ~100ms scheduling overhead. Parameter syncs are fired at episode end and resolved at episode start, overlapping the ~300ms transfer with MCTS compute. All GPU→CPU metrics pack into a single `jnp.concatenate` for one DMA transaction.
