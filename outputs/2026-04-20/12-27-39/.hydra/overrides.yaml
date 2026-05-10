@@ -1,4 +1,0 @@
-- mcts=joint
-- train.num_episodes=50
-- train.warmup_episodes=10
-- train.num_actors=1
